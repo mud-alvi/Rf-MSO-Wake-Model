@@ -3,9 +3,10 @@
 It is a model used for wake loss analysis and AEP. 
 
 17 july:
-as of right now all the necessary libraries have been added into the code and the turbine to be used for analysis has been selected.
-the selected turbine is the (VESTOS v110)
-all of its specifications except the power-wind graph have been added.
+1. All required Python libraries for the Gaussian Wake Model have been added to the project.
+2. The turbine selected for the analysis is the Vestas V110-2.0 MW.
+3. All turbine specifications have been implemented in the code.
+4. The only remaining turbine-related component is the power-wind curve data, which has not yet been added.
 
 18 july:
 1. the required csv files have been recieved by the coding team.
