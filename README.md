@@ -12,3 +12,9 @@ It is a model used for wake loss analysis and AEP.
 1. the required csv files have been recieved by the coding team.
 2. the power-wind curve was also given by researcher members
 3. additional specifications related to the turbine are also being added such as the (rotor-area being derrived from rotor-diameter)
+
+19 july:
+1. The 3 files were added to GitHub as of now (layout, turbine, wake_model), obtained from Socrates, along with 2 CSV files (the era5_windspeed CSV is large; its sample will be put for public display, but the whole file cannot be added).
+2. Many changes were made to the turbine code, which include classifying the turbine as a class and, instead of the code, giving it the actual power-wind curve for its model. (The source to be cited will be shared below.)
+3. Accordingly, the assigners from the turbine model to layout and wake_model were changed so that the code does not fail, but the rest of the code is untouched.
+SOURCE: https://www.thewindpower.net/turbine_power_curve_en_590_vestas_v110-2000.php
