@@ -39,5 +39,6 @@ SOURCE: https://www.thewindpower.net/turbine_power_curve_en_590_vestas_v110-2000
 3. The hourly timestamps are converted from UTC to Amarillo local time so the yearly results match the local 2020–2025 calendar.
 4. These variables are currently reported as hazard-exposure indicators. No arbitrary AEP-loss penalty is assigned to them.
 5. Thunderstorm flags represent observed thunderstorm conditions, not measured lightning-strike counts. Humidity and precipitation alone are not sufficient for a physical icing-loss calculation; synchronized temperature and precipitation type are still required.
+6. other turbine properties were also added in the 'turbine.py' file
 
 NOAA SOURCE: https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2
