@@ -26,3 +26,9 @@ SOURCE: https://www.thewindpower.net/turbine_power_curve_en_590_vestas_v110-2000
 21 july:
 1. A staggered model in direction of the wind currents was tested to see if it was able to produce higher AEP than the predefined staggered model but it was unsucessful so it was not included in the final code.
 2. In resilliance testing instead of cumilative weather testing, independent conditions such as low, moderate and high; heat, cold and gust were tested. Drought data was also gathered and was used to test weather resilliance. RESULT: Higher drought severity was associated with lower modeled weather resilience in the 2020–2025 dataset.
+
+23 july:
+1. As the AEP changes were minimal and not report worthy discussions were made on how to move forward with the current findings and actually make a reasonable discovery.
+
+24 july:
+1. Two main ideas were adopted on how to move forwards and flowcharts and all the required data was discussed.
