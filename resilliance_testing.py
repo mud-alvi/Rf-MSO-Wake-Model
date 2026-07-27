@@ -6,6 +6,11 @@ import pandas as pd
 
 import main
 from drought_monitor import load_drought_data
+from weather_hazards import (
+    load_hourly_hazard_data,
+    make_hourly_hazard_graph,
+    yearly_hazard_summary,
+)
 
 
 # NOAA file stored in the same folder as this code
@@ -220,6 +225,38 @@ def make_drought_resilience_graph(noaa):
     print(f"  Saved {filename}")
 
 
+def print_hourly_hazard_summary(hourly, summary):
+    # Report exposure separately from the assumed AEP-loss scenarios
+    print("\nNOAA KAMA hourly hazard exposure")
+    print(summary.round(2).to_string())
+    print("\nSix-year hourly hazard totals")
+    print(f"  Observation hours: {len(hourly)}")
+    print(
+        "  Average filled relative humidity: "
+        f"{hourly['relative_humidity_pct_filled'].mean():.2f}%"
+    )
+    print(
+        "  Recorded precipitation: "
+        f"{hourly['precip_in'].sum(min_count=1):.2f} in"
+    )
+    print(
+        "  Measurable-precipitation hours: "
+        f"{int((hourly['precip_in'] > 0).sum())}"
+    )
+    print(
+        "  Trace-precipitation hours: "
+        f"{int(hourly['precip_trace_flag'].sum(min_count=1))}"
+    )
+    print(
+        "  Dust-event hours: "
+        f"{int(hourly['dust_flag'].sum(min_count=1))}"
+    )
+    print(
+        "  Thunderstorm hours: "
+        f"{int(hourly['thunderstorm_flag'].sum(min_count=1))}"
+    )
+
+
 def run():
     # Run the wake model once and create the resilience graphs
     wake = main.run_experiment()
@@ -263,6 +300,16 @@ def run():
 
     # Create the separate drought-resilience relationship graph
     make_drought_resilience_graph(noaa)
+
+    # Summarize the new hourly exposure data without assigning AEP loss
+    hourly = load_hourly_hazard_data(
+        start_year=main.START_YEAR,
+        end_year=main.END_YEAR,
+    )
+    summary = yearly_hazard_summary(hourly)
+    print_hourly_hazard_summary(hourly, summary)
+    saved_graph = make_hourly_hazard_graph(summary)
+    print(f"  Saved {os.path.basename(saved_graph)}")
 
 
 if __name__ == "__main__":

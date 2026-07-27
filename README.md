@@ -32,3 +32,12 @@ SOURCE: https://www.thewindpower.net/turbine_power_curve_en_590_vestas_v110-2000
 
 24 july:
 1. Two main ideas were adopted on how to move forwards and flowcharts and all the required data was discussed.
+
+27 july:
+1. NOAA KAMA hourly observations for 2020–2025 were integrated through `weather_hazards.py`.
+2. The new analysis summarizes relative humidity, recorded precipitation, trace and multi-hour precipitation flags, dust-event hours, and thunderstorm hours by year.
+3. The hourly timestamps are converted from UTC to Amarillo local time so the yearly results match the local 2020–2025 calendar.
+4. These variables are currently reported as hazard-exposure indicators. No arbitrary AEP-loss penalty is assigned to them.
+5. Thunderstorm flags represent observed thunderstorm conditions, not measured lightning-strike counts. Humidity and precipitation alone are not sufficient for a physical icing-loss calculation; synchronized temperature and precipitation type are still required.
+
+NOAA SOURCE: https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2
