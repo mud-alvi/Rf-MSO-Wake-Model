@@ -6,7 +6,7 @@ import numpy as np
 from layouts import grid_layout, staggered_layout
 from main import calculate_aep, load_real_wind_data
 from turbine import vestas
- 
+from lcoe_model import calculate_lcoe
  
 turbines = 25
 D = vestas.rotor_diameter
@@ -409,6 +409,7 @@ def run_optimization():
         full_check_count=2,
         seed=42,
     )
+    best_lcoe = calculate_lcoe(layout=best_layout, annual_aep_mwh=best_aep,)
  
     _, staggered_wake_loss = calculate_aep(staggered_positions, speeds, directions)
     _, best_wake_loss = calculate_aep(best_layout, speeds, directions)
@@ -421,6 +422,7 @@ def run_optimization():
         f"Best GA layout:     {best_aep:,.1f} MWh | Wake loss: {best_wake_loss:.2f}% | "
         f"Difference: +{final_diff:,.1f} MWh ({final_pct:+.3f}%)"
     )
+    print(f"Best GA layout LCOE: ${best_lcoe:,.2f}/MWh")
  
     script_dir = os.path.dirname(os.path.abspath(__file__))
  
@@ -446,6 +448,7 @@ def run_optimization():
         "best_aep": best_aep,
         "best_layout": best_layout,
         "history": history,
+        "best_LCOE": best_lcoe
     }
  
  
