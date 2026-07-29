@@ -17,7 +17,9 @@ class TurbineModel:
         rated_speed,
         cut_out_speed,
         power_curve_path,
+        ct_curve_path,
         thrust_coefficient=0.8,
+        **kwargs,
     ):
         self.name = name
         self.rotor_diameter = rotor_diameter
@@ -28,7 +30,8 @@ class TurbineModel:
         self.cut_out_speed = cut_out_speed
         self.thrust_coefficient = thrust_coefficient
 
-        self.power_curve_path = power_curve_path 
+        self.power_curve_path = power_curve_path
+        self.ct_curve_path = ct_curve_path
 
         power_curve_data = pd.read_csv(power_curve_path)  # Load power curve data from CSV
         self.power_wind_speeds = power_curve_data['wind_speed_m_s'].values  # Wind speeds from the CSV
@@ -37,9 +40,13 @@ class TurbineModel:
         if self.power_wind_speeds.max() < self.cut_out_speed:
             raise ValueError("Power curve data does not cover the cut-out wind speed. Please provide a complete power curve.")
 
-        ct_curve_data = pd.read_csv(power_curve_path)  # Load thrust coefficient data from CSV
-        self.wind_speeds_m_s = ct_curve_data['wind_speed_m_s'].values  # Wind speeds from the CSV
-        self.thrust_coefficient = ct_curve_data['thrust_coefficient'].values  # Corresponding thrust coefficients
+        ct_curve_data = pd.read_csv(ct_curve_path)  # Load thrust coefficient data from CSV
+        self.ct_wind_speeds = ct_curve_data['wind_speed_m_s'].values  # Wind speeds from the CSV
+        self.ct_values = ct_curve_data['thrust_coefficient'].values  # Corresponding thrust coefficients
+        self.thrust_coefficient = float(np.interp(self.rated_speed, self.ct_wind_speeds, self.ct_values, left=self.ct_values[0], right=self.ct_values[-1]))
+
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
     @property # allows you to access functions as variables
@@ -50,8 +57,34 @@ class TurbineModel:
     def power_output(self, wind_speed):
         power = np.interp(wind_speed, self.power_wind_speeds, self.power_output_kw, left=0, right=0)  #interpolation and left and right values for out of bounds wind speeds
         
-        power = np.where(wind_speed >= self.cut_out_speed,0.0, power)
+        power = np.where(wind_speed >= self.cut_out_speed, 0.0, power)
         return power
+
+    def ct_at(self, wind_speed):
+        """Return the interpolated thrust coefficient at the given wind speed."""
+        ct = np.interp(
+            wind_speed,
+            self.ct_wind_speeds,
+            self.ct_values,
+            left=self.ct_values[0],
+            right=self.ct_values[-1],
+        )
+        return np.clip(ct, 0.0, 1.0)
+
+    def thrust_force(self, wind_speed, air_density=1.225):
+        """Return aerodynamic thrust force for the turbine at a given effective wind speed.
+
+        The force is zero outside the operational range [cut-in, cut-out).
+        """
+        U = np.asarray(wind_speed, dtype=float)
+        Ct = self.ct_at(U)
+        force = 0.5 * air_density * self.rotor_area * Ct * U ** 2
+
+        outside_operating = (U < self.cut_in_speed) | (U >= self.cut_out_speed)
+        if np.isscalar(U):
+            return 0.0 if outside_operating else float(force)
+        force[outside_operating] = 0.0
+        return force
     
 power_curve_path = Path(__file__).resolve().parent / "vestas_v110_actual_power_curve_table.csv"  # Placeholder for the actual power curve CSV file path
 ct_curve_path = Path(__file__).resolve().parent / "vestas_v110_2mw_ct_curve.csv"  # Placeholder for the actual thrust coefficient CSV file path

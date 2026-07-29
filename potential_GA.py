@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
  
 from layouts import grid_layout, staggered_layout
-from main import calculate_aep, load_real_wind_data
+from main import calculate_aep, calculate_farm_fatigue, load_real_wind_data
 from turbine import vestas
 from lcoe_model import calculate_lcoe
  
@@ -380,17 +380,24 @@ def run_optimization():
     staggered_positions = staggered_layout()
  
     # `fitness` (fast, subsample-based) ranks the population each
-    # generation. `full_fitness` (the true full-dataset AEP) checks the
-    # baseline and the best few candidates from every generation.
+    # generation using normalized fatigue relative to the staggered baseline.
     rng = np.random.default_rng(42)
     sample_size = min(1000, len(speeds))
     sample_indices = rng.choice(len(speeds), sample_size, replace=False)
     search_speeds = speeds[sample_indices]
     search_directions = directions[sample_indices]
+
+    staggered_search_fatigue = calculate_farm_fatigue(
+        staggered_positions,
+        search_speeds,
+        search_directions,
+    )
+    baseline_max_fatigue = staggered_search_fatigue["maximum_fatigue"]
  
     def fitness(layout):
-        aep, _ = calculate_aep(layout, search_speeds, search_directions)
-        return aep
+        fatigue = calculate_farm_fatigue(layout, search_speeds, search_directions)
+        candidate_max_fatigue = fatigue["maximum_fatigue"]
+        return baseline_max_fatigue / candidate_max_fatigue
  
     def full_fitness(layout):
         aep, _ = calculate_aep(layout, speeds, directions)
@@ -413,6 +420,8 @@ def run_optimization():
  
     _, staggered_wake_loss = calculate_aep(staggered_positions, speeds, directions)
     _, best_wake_loss = calculate_aep(best_layout, speeds, directions)
+    best_fatigue = calculate_farm_fatigue(best_layout, speeds, directions)
+    staggered_fatigue = calculate_farm_fatigue(staggered_positions, speeds, directions)
     final_diff = best_aep - staggered_aep
     final_pct = (final_diff / staggered_aep) * 100
  
@@ -423,6 +432,16 @@ def run_optimization():
         f"Difference: +{final_diff:,.1f} MWh ({final_pct:+.3f}%)"
     )
     print(f"Best GA layout LCOE: ${best_lcoe:,.2f}/MWh")
+    print(
+        f"Best GA layout fatigue: max = {best_fatigue['maximum_fatigue']:.3e}, "
+        f"mean = {best_fatigue['mean_fatigue']:.3e}, "
+        f"worst turbine = {best_fatigue['worst_turbine']}"
+    )
+    print(
+        f"Staggered baseline fatigue: max = {staggered_fatigue['maximum_fatigue']:.3e}, "
+        f"mean = {staggered_fatigue['mean_fatigue']:.3e}, "
+        f"worst turbine = {staggered_fatigue['worst_turbine']}"
+    )
  
     script_dir = os.path.dirname(os.path.abspath(__file__))
  
