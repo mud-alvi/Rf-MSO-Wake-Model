@@ -179,6 +179,14 @@ def _load_noaa_weather_data(csv_path):
         }
     )
     daily = daily.groupby("date", as_index=False).mean(numeric_only=True)
+
+    # Fill short daily gaps from the surrounding measured values.
+    weather_columns = ["temperature_K", "pressure_Pa"]
+    daily[weather_columns] = daily[weather_columns].interpolate(
+        method="linear",
+        limit_direction="both",
+    )
+
     daily["air_density_kg_m3"] = _calculate_air_density(
         daily["pressure_Pa"], daily["temperature_K"]
     )
