@@ -8,6 +8,7 @@ import pandas as pd
 
 from fatigue_model import AMBIENT_TI, FATIGUE_EXPONENT, fatigue_index
 from layouts import grid_layout, staggered_layout
+from lcoe_model import calculate_lcoe_details
 from turbine import vestas
 from wake_model import (
     WAKE_GROWTH_RATE,
@@ -28,6 +29,8 @@ SITE_LAT = 35.25
 SITE_LON = -101.75
 START_YEAR = 2020
 END_YEAR = 2025
+COMPARISON_DOMAIN_D = 25
+DIRECTION_BINS = 16
 
 AIR_GAS_CONSTANT = 287.05
 STANDARD_AIR_DENSITY = 1.225
@@ -520,25 +523,354 @@ def calculate_farm_fatigue(
     }
 
 
+def centre_layout_in_domain(layout, domain_d=COMPARISON_DOMAIN_D):
+    """Centre a layout inside the same 25D × 25D domain used by the GA."""
+    layout = np.asarray(layout, dtype=float).copy()
+    domain_size = domain_d * vestas.rotor_diameter
+
+    layout -= layout.min(axis=0)
+    extent = layout.max(axis=0)
+
+    layout += np.array(
+        [
+            (domain_size - extent[0]) / 2.0,
+            (domain_size - extent[1]) / 2.0,
+        ]
+    )
+
+    return layout
+
+
+def add_bar_labels(axis, bars, value_format):
+    for bar in bars:
+        value = bar.get_height()
+        axis.text(
+            bar.get_x() + bar.get_width() / 2.0,
+            value,
+            value_format.format(value),
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+
+def make_metrics_comparison_graph(results):
+    names = ["Grid", "Staggered"]
+    colours = ["steelblue", "darkorange"]
+
+    aep_values = [
+        results["grid"]["aep"],
+        results["staggered"]["aep"],
+    ]
+
+    lcoe_values = [
+        results["grid"]["lcoe"],
+        results["staggered"]["lcoe"],
+    ]
+
+    # Normalized because the raw fatigue proxy is around 10^29.
+    grid_fatigue = results["grid"]["maximum_fatigue"]
+    fatigue_ratios = [
+        results["grid"]["maximum_fatigue"] / grid_fatigue,
+        results["staggered"]["maximum_fatigue"] / grid_fatigue,
+    ]
+
+    figure, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    aep_bars = axes[0].bar(names, aep_values, color=colours)
+    axes[0].set_title("Combined 25-Turbine AEP")
+    axes[0].set_ylabel("AEP (MWh/year)")
+    add_bar_labels(axes[0], aep_bars, "{:,.0f}")
+
+    lcoe_bars = axes[1].bar(names, lcoe_values, color=colours)
+    axes[1].set_title("Levelized Cost of Energy")
+    axes[1].set_ylabel("LCOE ($/MWh)")
+    add_bar_labels(axes[1], lcoe_bars, "${:.2f}")
+
+    fatigue_bars = axes[2].bar(names, fatigue_ratios, color=colours)
+    axes[2].axhline(1.0, color="black", linestyle="--", alpha=0.6)
+    axes[2].set_title("Maximum Fatigue Proxy")
+    axes[2].set_ylabel("Relative index (grid = 1.00)")
+    add_bar_labels(axes[2], fatigue_bars, "{:.3f}")
+
+    for axis in axes:
+        axis.grid(axis="y", alpha=0.25)
+
+    figure.suptitle(
+        "Grid vs Staggered Performance — Amarillo 2020–2025"
+    )
+    figure.tight_layout()
+    figure.savefig(
+        os.path.join(SCRIPT_DIR, "grid_vs_staggered_metrics.png"),
+        dpi=150,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+
+def make_wake_loss_graph(results):
+    names = ["Grid", "Staggered"]
+    wake_losses = [
+        results["grid"]["wake_loss"],
+        results["staggered"]["wake_loss"],
+    ]
+
+    figure, axis = plt.subplots(figsize=(8, 6))
+
+    bars = axis.bar(
+        names,
+        wake_losses,
+        color=["steelblue", "darkorange"],
+    )
+
+    axis.set_title("Grid vs Staggered Wake-Energy Loss")
+    axis.set_ylabel("Wake loss (%)")
+    axis.grid(axis="y", alpha=0.25)
+
+    add_bar_labels(axis, bars, "{:.2f}%")
+
+    figure.tight_layout()
+    figure.savefig(
+        os.path.join(
+            SCRIPT_DIR,
+            "grid_vs_staggered_wake_loss.png",
+        ),
+        dpi=150,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+
+def make_wind_rose_graph(speeds, directions):
+    # Convert ERA5 100 m speeds to the Vestas 95 m hub height.
+    hub_speeds = wind_speed_at_hub(speeds)
+    directions = np.asarray(directions, dtype=float) % 360.0
+
+    direction_edges = np.linspace(
+        0.0,
+        360.0,
+        DIRECTION_BINS + 1,
+    )
+    direction_centres = np.radians(
+        (direction_edges[:-1] + direction_edges[1:]) / 2.0
+    )
+    bar_width = np.radians(360.0 / DIRECTION_BINS)
+
+    speed_edges = np.array(
+        [0.0, 3.0, 6.0, 9.0, 12.0, 15.0, 20.0, np.inf]
+    )
+    speed_labels = [
+        "0–3 m/s",
+        "3–6 m/s",
+        "6–9 m/s",
+        "9–12 m/s",
+        "12–15 m/s",
+        "15–20 m/s",
+        "20+ m/s",
+    ]
+
+    colours = plt.cm.viridis(
+        np.linspace(0.12, 0.92, len(speed_labels))
+    )
+
+    figure, axis = plt.subplots(
+        figsize=(9, 8),
+        subplot_kw={"projection": "polar"},
+    )
+
+    bottom = np.zeros(DIRECTION_BINS)
+
+    for lower, upper, label, colour in zip(
+        speed_edges[:-1],
+        speed_edges[1:],
+        speed_labels,
+        colours,
+    ):
+        selected = (hub_speeds >= lower) & (hub_speeds < upper)
+
+        counts, _ = np.histogram(
+            directions[selected],
+            bins=direction_edges,
+        )
+
+        frequency = counts / len(directions) * 100.0
+
+        axis.bar(
+            direction_centres,
+            frequency,
+            width=bar_width,
+            bottom=bottom,
+            color=colour,
+            edgecolor="white",
+            linewidth=0.4,
+            label=label,
+        )
+
+        bottom += frequency
+
+    axis.set_theta_zero_location("N")
+    axis.set_theta_direction(-1)
+    axis.set_title(
+        "Amarillo Wind Rose, 2020–2025\n"
+        "Wind speed corrected from 100 m to 95 m hub height",
+        pad=24,
+    )
+    axis.set_ylabel("Frequency (%)")
+    axis.legend(
+        title="Hub-height wind speed",
+        loc="upper left",
+        bbox_to_anchor=(1.05, 1.05),
+    )
+
+    figure.tight_layout()
+    figure.savefig(
+        os.path.join(SCRIPT_DIR, "wind_rose_2020_2025.png"),
+        dpi=150,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+
+def make_layout_comparison_graph(layouts):
+    rotor_diameter = vestas.rotor_diameter
+    domain_size_d = COMPARISON_DOMAIN_D
+
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(13, 6),
+        sharex=True,
+        sharey=True,
+    )
+
+    for axis, name, colour in zip(
+        axes,
+        ("grid", "staggered"),
+        ("steelblue", "darkorange"),
+    ):
+        layout_d = layouts[name] / rotor_diameter
+
+        axis.scatter(
+            layout_d[:, 0],
+            layout_d[:, 1],
+            s=75,
+            color=colour,
+            edgecolor="black",
+            linewidth=0.5,
+        )
+
+        for turbine_number, (x_position, y_position) in enumerate(
+            layout_d
+        ):
+            axis.annotate(
+                str(turbine_number),
+                (x_position, y_position),
+                xytext=(4, 4),
+                textcoords="offset points",
+                fontsize=7,
+            )
+
+        axis.set_xlim(0.0, domain_size_d)
+        axis.set_ylim(0.0, domain_size_d)
+        axis.set_aspect("equal")
+        axis.set_title(f"{name.title()} layout — 5D spacing")
+        axis.set_xlabel("X position (rotor diameters)")
+        axis.grid(alpha=0.25)
+
+    axes[0].set_ylabel("Y position (rotor diameters)")
+
+    figure.suptitle(
+        "Baseline Layouts Inside the 25D × 25D Search Domain"
+    )
+    figure.tight_layout()
+    figure.savefig(
+        os.path.join(
+            SCRIPT_DIR,
+            "grid_vs_staggered_layouts.png",
+        ),
+        dpi=150,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+
+def print_layout_results(name, metrics):
+    print(f"\n===== {name.upper()} LAYOUT =====")
+    print(f"AEP: {metrics['aep']:,.1f} MWh/year")
+    print(f"LCOE: ${metrics['lcoe']:,.2f}/MWh")
+    print(f"Wake loss: {metrics['wake_loss']:.2f}%")
+    print(
+        f"Maximum fatigue proxy: "
+        f"{metrics['maximum_fatigue']:.3e}"
+    )
+    print(
+        f"Mean fatigue proxy: "
+        f"{metrics['mean_fatigue']:.3e}"
+    )
+    print(f"Worst turbine: {metrics['worst_turbine']}")
+    print(
+        f"Cable length: "
+        f"{metrics['cable_length_m']:,.1f} m"
+    )
+    print(
+        f"Road length: "
+        f"{metrics['road_length_m']:,.1f} m"
+    )
+
+
 def run_experiment():
+    print(
+        "Loading synchronized 2020–2025 wind, "
+        "temperature and pressure data..."
+    )
+
     weather = load_real_weather_data()
+
     speeds = weather["wind_speed_m_s"].to_numpy()
     directions = weather["wind_direction_deg"].to_numpy()
     densities = weather["air_density_kg_m3"].to_numpy()
-    results = {}
-    for name, layout in (
-        ("grid", grid_layout()),
-        ("staggered", staggered_layout()),
-    ):
-        results[name] = calculate_layout_performance(
-            layout, speeds, directions, densities
-        )
-    print(
-        f"Grid AEP: {results['grid']['aep']:,.1f} MWh | "
-        f"Staggered AEP: {results['staggered']['aep']:,.1f} MWh"
-    )
-    return results
 
+    layouts = {
+        "grid": centre_layout_in_domain(grid_layout()),
+        "staggered": centre_layout_in_domain(staggered_layout()),
+    }
+
+    results = {}
+
+    for name, layout in layouts.items():
+        performance = calculate_layout_performance(
+            layout,
+            speeds,
+            directions,
+            air_densities=densities,
+        )
+
+        lcoe = calculate_lcoe_details(
+            layout,
+            performance["aep"],
+        )
+
+        results[name] = {
+            **performance,
+            **lcoe,
+        }
+
+        print_layout_results(name, results[name])
+
+    make_metrics_comparison_graph(results)
+    make_wake_loss_graph(results)
+    make_wind_rose_graph(speeds, directions)
+    make_layout_comparison_graph(layouts)
+
+    print(
+        "\nGraphs saved:\n"
+        "1. grid_vs_staggered_metrics.png\n"
+        "2. grid_vs_staggered_wake_loss.png\n"
+        "3. wind_rose_2020_2025.png\n"
+        "4. grid_vs_staggered_layouts.png"
+    )
+
+    return results
 
 if __name__ == "__main__":
     run_experiment()
