@@ -18,8 +18,10 @@ from wake_model import (
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WIND_CSV_PATH = os.path.join(SCRIPT_DIR, "era5_wind_speeds2023_only.csv")
-WEATHER_CSV_PATH = os.path.join(SCRIPT_DIR, "4362675.csv")
+WIND_CSV_PATH = os.path.join(SCRIPT_DIR, "era5_wind_speeds2.csv")
+WEATHER_CSV_PATH = os.path.join(
+    SCRIPT_DIR, "amarillo_temperature_pressure_2020_2025_hourly.csv"
+)
 TEMPERATURE_CSV_PATH = WEATHER_CSV_PATH
 PRESSURE_CSV_PATH = WEATHER_CSV_PATH
 SITE_LAT = 35.25
@@ -140,7 +142,9 @@ def _load_noaa_weather_data(csv_path):
         raise ValueError("NOAA weather CSV requires DATE, date, or time.")
     df = _ensure_timestamp(df, time_column, allow_duplicates=True)
 
-    if "HourlyDryBulbTemperature" in df:
+    if "HourlyDryBulbTemperature_C" in df:
+        temperature = _to_kelvin(df["HourlyDryBulbTemperature_C"], "C")
+    elif "HourlyDryBulbTemperature" in df:
         temperature = _to_kelvin(df["HourlyDryBulbTemperature"], "F")
     elif "TAVG" in df:
         temperature = _to_kelvin(df["TAVG"], "F")
@@ -151,16 +155,20 @@ def _load_noaa_weather_data(csv_path):
         )
     else:
         raise ValueError(
-            "NOAA file requires HourlyDryBulbTemperature, TAVG, or TMAX/TMIN."
+            "NOAA file requires HourlyDryBulbTemperature_C, "
+            "HourlyDryBulbTemperature, TAVG, or TMAX/TMIN."
         )
 
-    if "HourlyStationPressure" in df:
+    if "HourlyStationPressure_hPa" in df:
+        pressure = _to_pascals(df["HourlyStationPressure_hPa"], "hPa")
+    elif "HourlyStationPressure" in df:
         pressure = _to_pascals(df["HourlyStationPressure"], "inHg")
     elif "HourlySeaLevelPressure" in df:
         pressure = _to_pascals(df["HourlySeaLevelPressure"], "inHg")
     else:
         raise ValueError(
-            "NOAA file requires HourlyStationPressure or HourlySeaLevelPressure."
+            "NOAA file requires HourlyStationPressure_hPa, "
+            "HourlyStationPressure, or HourlySeaLevelPressure."
         )
 
     daily = pd.DataFrame(
