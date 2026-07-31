@@ -1,475 +1,565 @@
+"""Editable multi-start GA for AEP, LCOE, wake steering and fatigue."""
+
 import os
- 
+
 import matplotlib.pyplot as plt
 import numpy as np
- 
-from layouts import grid_layout, staggered_layout
-from main import calculate_aep, calculate_farm_fatigue, load_real_wind_data
+
+from layouts import layout_families, staggered_layout
+from lcoe_model import calculate_lcoe_details
+from main import (
+    build_wind_rose_cases,
+    calculate_layout_performance,
+    load_real_weather_data,
+)
 from turbine import vestas
-from lcoe_model import calculate_lcoe
- 
-turbines = 25
+
+# ========================= EXPERIMENT SETTINGS =========================
+# Peers can edit these values directly in their IDE for separate runs.
+SEEDS = list(range(20))
+POPULATION_SIZE = 60
+GENERATIONS = 40
+TOURNAMENT_SIZE = 4
+ELITE_COUNT = 3
+FULL_CHECK_COUNT = 3
+
+SEARCH_WIDTH_D = 25
+SEARCH_HEIGHT_D = 25
+MIN_SPACING_D = 4
+DIRECTION_BINS = 16
+SPEED_BINS = 8
+
+INITIAL_MUTATION_RATE = 0.30
+FINAL_MUTATION_RATE = 0.10
+INITIAL_MUTATION_DISTANCE_D = 0.90
+FINAL_MUTATION_DISTANCE_D = 0.35
+STAGNATION_LIMIT = 4
+
+YAW_MIN_DEG = -25.0
+YAW_MAX_DEG = 25.0
+WAKE_LOSS_PENALTY = 0.05
+MEAN_FATIGUE_PENALTY = 0.05
+SAVE_GRAPHS = True
+# ======================================================================
+
 D = vestas.rotor_diameter
- 
-width = 20 * D
-height = 22.5 * D
-min_spacing = 4 * D
- 
- 
-# LAYOUTS
- 
+TURBINES = 25
+WIDTH = SEARCH_WIDTH_D * D
+HEIGHT = SEARCH_HEIGHT_D * D
+MIN_SPACING = MIN_SPACING_D * D
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def sort_layout(layout):
-    order = np.lexsort((layout[:, 1], layout[:, 0]))
-    return layout[order]
- 
- 
+    layout = np.asarray(layout, dtype=float)
+    return layout[np.lexsort((layout[:, 1], layout[:, 0]))]
+
+
+def centre_in_domain(layout):
+    layout = np.asarray(layout, dtype=float).copy()
+    layout -= layout.min(axis=0)
+    extent = layout.max(axis=0)
+    layout += np.array([(WIDTH - extent[0]) / 2.0, (HEIGHT - extent[1]) / 2.0])
+    return layout
+
+
 def generate_layout(rng):
-    # Generate one valid random layout
-    while True:
-        layout = []
- 
-        for _ in range(10000):
-            candidate = np.array([
-                rng.uniform(0, width),
-                rng.uniform(0, height),
-            ])
- 
-            valid_position = all(
-                np.linalg.norm(candidate - existing) >= min_spacing
-                for existing in layout
-            )
- 
-            if valid_position:
-                layout.append(candidate)
- 
-            if len(layout) == turbines:
-                return sort_layout(np.array(layout))
- 
- 
-def generate_population(size, rng, starting_layout=None):
-    if starting_layout is None:
-        return [generate_layout(rng) for _ in range(size)]
- 
-    population = [sort_layout(np.array(starting_layout, dtype=float))]
-    variant_count = max(1, int(size * 0.7))
- 
-    while len(population) < variant_count:
-        variant = mutate(
-            population[0],
-            rng,
-            mutation_rate=0.35,
-            mutation_distance=0.35 * D,
-        )
-        population.append(repair_layout(variant, rng))
- 
-    # The remaining slots are fully random layouts. This matters more than it
-    # looks: without a steady stream of genuinely unrelated genotypes, the
-    # population converges around the staggered seed within a few
-    # generations and crossover just recombines near-identical parents.
+    layout = []
+    for _ in range(20000):
+        candidate = rng.uniform([0.0, 0.0], [WIDTH, HEIGHT])
+        if all(
+            np.linalg.norm(candidate - existing) >= MIN_SPACING
+            for existing in layout
+        ):
+            layout.append(candidate)
+            if len(layout) == TURBINES:
+                return sort_layout(layout)
+    raise RuntimeError("Could not generate a valid layout in the search domain.")
+
+
+def repair_layout(layout, rng):
+    repaired = []
+    for original in np.asarray(layout, dtype=float):
+        candidate = np.clip(original, [0.0, 0.0], [WIDTH, HEIGHT])
+        for attempt in range(5000):
+            if all(
+                np.linalg.norm(candidate - existing) >= MIN_SPACING
+                for existing in repaired
+            ):
+                repaired.append(candidate)
+                break
+            if attempt < 100:
+                candidate = np.clip(
+                    original + rng.normal(0.0, 0.35 * D, 2),
+                    [0.0, 0.0],
+                    [WIDTH, HEIGHT],
+                )
+            else:
+                candidate = rng.uniform([0.0, 0.0], [WIDTH, HEIGHT])
+        else:
+            return generate_layout(rng)
+    return sort_layout(repaired)
+
+
+def make_individual(layout, yaw=None):
+    return {
+        "layout": np.asarray(layout, dtype=float),
+        "yaw": (
+            np.zeros(DIRECTION_BINS)
+            if yaw is None
+            else np.asarray(yaw, dtype=float)
+        ),
+    }
+
+
+def copy_individual(individual):
+    return {
+        "layout": individual["layout"].copy(),
+        "yaw": individual["yaw"].copy(),
+    }
+
+
+def mutate_individual(individual, rng, rate, distance):
+    child = copy_individual(individual)
+    position_mask = rng.random(TURBINES) < rate
+    child["layout"][position_mask] += rng.normal(
+        0.0, distance, (position_mask.sum(), 2)
+    )
+    yaw_mask = rng.random(DIRECTION_BINS) < rate
+    child["yaw"][yaw_mask] += rng.normal(0.0, 4.0, yaw_mask.sum())
+    child["yaw"] = np.clip(child["yaw"], YAW_MIN_DEG, YAW_MAX_DEG)
+    child["layout"] = repair_layout(child["layout"], rng)
+    return child
+
+
+def generate_population(size, rng):
+    families = [
+        make_individual(repair_layout(centre_in_domain(layout), rng))
+        for layout in layout_families(rng)
+    ]
+    population = families[:size]
     while len(population) < size:
-        population.append(generate_layout(rng))
- 
+        parent = population[rng.integers(len(population))]
+        population.append(
+            mutate_individual(parent, rng, 0.35, 0.75 * D)
+        )
     return population
- 
- 
-# SELECTION
- 
-def selection(population, fitness_scores, rng, tournament_size=3):
+
+
+def tournament_selection(population, scores, rng):
     competitors = rng.choice(
         len(population),
-        size=tournament_size,
+        size=min(TOURNAMENT_SIZE, len(population)),
         replace=False,
     )
- 
-    winner = max(
-        competitors,
-        key=lambda index: fitness_scores[index],
+    winner = max(competitors, key=lambda index: scores[index])
+    return copy_individual(population[winner])
+
+
+def crossover(parent_1, parent_2, rng):
+    position_mask = rng.random(TURBINES) < 0.5
+    yaw_mask = rng.random(DIRECTION_BINS) < 0.5
+    child_layout = parent_2["layout"].copy()
+    child_yaw = parent_2["yaw"].copy()
+    child_layout[position_mask] = parent_1["layout"][position_mask]
+    child_yaw[yaw_mask] = parent_1["yaw"][yaw_mask]
+    return make_individual(child_layout, child_yaw)
+
+
+def evaluate_individual(individual, speeds, directions, densities, weights):
+    metrics = calculate_layout_performance(
+        individual["layout"],
+        speeds,
+        directions,
+        air_densities=densities,
+        sample_weights=weights,
+        yaw_schedule=individual["yaw"],
     )
- 
-    return population[winner].copy()
- 
- 
-# CROSSOVER
- 
-def crossover(parent1, parent2, rng):
-    # Inherit complete turbine positions. Blending coordinates can pull two
-    # otherwise well-spaced turbines into the same area and forces the repair
-    # function to replace much of the child with random positions.
-    inherit_from_parent1 = rng.random(turbines) < 0.5
-    child = parent2.copy()
-    child[inherit_from_parent1] = parent1[inherit_from_parent1]
-    return child
- 
- 
-# MUTATION
- 
-def mutate(
-    layout,
-    rng,
-    mutation_rate=0.10,
-    mutation_distance=0.5 * D,
-):
-    mutated_layout = layout.copy()
- 
-    for i in range(turbines):
-        if rng.random() < mutation_rate:
-            mutated_layout[i] += rng.normal(0, mutation_distance, size=2)
- 
-    mutated_layout[:, 0] = np.clip(mutated_layout[:, 0], 0, width)
-    mutated_layout[:, 1] = np.clip(mutated_layout[:, 1], 0, height)
- 
-    return mutated_layout
- 
- 
-# REPAIR
- 
-def repair_layout(layout, rng):
-    repaired_layout = []
- 
-    for position in layout:
-        candidate = position.copy()
-        candidate[0] = np.clip(candidate[0], 0, width)
-        candidate[1] = np.clip(candidate[1], 0, height)
- 
-        attempts = 0
- 
-        while any(
-            np.linalg.norm(candidate - existing) < min_spacing
-            for existing in repaired_layout
-        ):
-            attempts += 1
- 
-            # First try a nearby position so useful parent geometry is kept.
-            # Use a random position only if local repair repeatedly fails.
-            if attempts <= 100:
-                candidate = position + rng.normal(0, 0.35 * D, size=2)
-                candidate[0] = np.clip(candidate[0], 0, width)
-                candidate[1] = np.clip(candidate[1], 0, height)
-            else:
-                candidate = np.array([
-                    rng.uniform(0, width),
-                    rng.uniform(0, height),
-                ])
- 
-            if attempts == 5000:
-                return generate_layout(rng)
- 
-        repaired_layout.append(candidate)
- 
-    return sort_layout(np.array(repaired_layout))
- 
- 
-# GENETIC ALGORITHM
- 
-def genetic_algorithm(
-    fitness_function,
-    full_fitness_function,
-    starting_layout=None,
-    population_size=24,
-    generations=20,
-    elite_count=2,
-    mutation_rate=0.20,
-    stagnation_limit=3,
-    full_check_count=3,
-    seed=42,
-):
-    """Evolve turbine layouts starting from `starting_layout`.
- 
-    `fitness_function` scores the population each generation and can be a
-    fast subsample-based estimate — it only needs to rank layouts relative
-    to each other, so approximation is fine here.
- 
-    `full_fitness_function` is the true full-dataset AEP. The staggered
-    baseline is evaluated once, then the best `full_check_count` layouts
-    from every generation are checked using all wind data. This prevents
-    approximation error in the 1,000-hour search sample from hiding a
-    genuinely better layout.
- 
-    Returns (best_layout, best_aep, starting_aep, history), where best_aep
-    and starting_aep are both full-dataset AEP values.
-    """
-    rng = np.random.default_rng(seed)
-    population = generate_population(population_size, rng, starting_layout)
- 
-    starting_aep = (
-        full_fitness_function(starting_layout)
-        if starting_layout is not None
-        else None
+    return {**metrics, **calculate_lcoe_details(individual["layout"], metrics["aep"])}
+
+
+def is_feasible(metrics, baseline, tolerance=1e-9):
+    return (
+        metrics["aep"] >= baseline["aep"] * (1.0 - tolerance)
+        and metrics["maximum_fatigue"]
+        <= baseline["maximum_fatigue"] * (1.0 + tolerance)
     )
- 
-    history = {
-        "generation": [],
-        "best_aep": [],
-        "difference": [],
-        "generation_search_score": [],
-    }
 
-    # The staggered baseline is already a valid champion. Starting from it
-    # prevents an inferior random layout from being reported as the best.
-    if starting_layout is not None:
-        best_layout = sort_layout(np.array(starting_layout, dtype=float))
-        best_aep = starting_aep
-    else:
-        best_layout = None
-        best_aep = -np.inf
 
-    stagnant_generations = 0
- 
-    for generation in range(1, generations + 1):
-        search_scores = np.array([
-            fitness_function(layout)
-            for layout in population
-        ])
-        ranking = np.argsort(search_scores)[::-1]
- 
-        generation_search_score = search_scores[ranking[0]]
+def constrained_score(metrics, baseline):
+    aep_ratio = metrics["aep"] / baseline["aep"]
+    max_fatigue_ratio = (
+        metrics["maximum_fatigue"] / baseline["maximum_fatigue"]
+    )
+    violation = max(0.0, 1.0 - aep_ratio) + max(
+        0.0, max_fatigue_ratio - 1.0
+    )
+    lcoe_ratio = metrics["lcoe"] / baseline["lcoe"]
+    wake_ratio = metrics["wake_loss"] / max(baseline["wake_loss"], 1e-9)
+    mean_fatigue_ratio = (
+        metrics["mean_fatigue"] / baseline["mean_fatigue"]
+    )
+    return (
+        -1000.0 * violation
+        - lcoe_ratio
+        - WAKE_LOSS_PENALTY * wake_ratio
+        - MEAN_FATIGUE_PENALTY * mean_fatigue_ratio
+    )
 
-        # Fully check the best few layouts from EVERY generation. The old
-        # version checked a layout only when it beat the all-time approximate
-        # score, which could permanently ignore a genuinely better full-year
-        # layout because the 1,000-hour search score is only an estimate.
-        improved = False
-        candidates_to_check = ranking[:min(full_check_count, len(ranking))]
 
-        for index in candidates_to_check:
-            candidate_layout = population[index]
-            candidate_aep = full_fitness_function(candidate_layout)
-
-            if candidate_aep > best_aep:
-                best_aep = candidate_aep
-                best_layout = candidate_layout.copy()
-                improved = True
-
-        if improved:
-            stagnant_generations = 0
-        else:
-            stagnant_generations += 1
- 
-        difference = (
-            best_aep - starting_aep if starting_aep is not None else 0.0
+def is_better(candidate, champion, baseline):
+    candidate_feasible = is_feasible(candidate, baseline)
+    champion_feasible = is_feasible(champion, baseline)
+    if candidate_feasible != champion_feasible:
+        return candidate_feasible
+    if candidate_feasible:
+        return (candidate["lcoe"], candidate["wake_loss"], -candidate["aep"]) < (
+            champion["lcoe"],
+            champion["wake_loss"],
+            -champion["aep"],
         )
- 
-        history["generation"].append(generation)
-        history["best_aep"].append(best_aep)
-        history["difference"].append(difference)
-        history["generation_search_score"].append(generation_search_score)
- 
-        if starting_aep is not None:
-            pct = (difference / starting_aep) * 100
-            print(
-                f"Generation {generation:>2}/{generations} | "
-                f"Estimated best: {generation_search_score:,.1f} MWh | "
-                f"AEP: {best_aep:,.1f} MWh | "
-                f"AEP Base: {starting_aep:,.1f} MWh | "
-                f"Difference: {difference:+,.1f} MWh ({pct:+.3f}%)"
-            )
-        else:
-            print(
-                f"Generation {generation:>2}/{generations} | "
-                f"AEP: {best_aep:,.1f} MWh"
-            )
- 
-        if generation == generations:
-            break
- 
-        # Adaptive mutation: if the population hasn't produced an
-        # improvement for a few generations in a row, temporarily widen the
-        # search (higher mutation rate + larger step size) to escape the
-        # plateau, then relax back once progress resumes.
-        if stagnant_generations >= stagnation_limit:
-            active_mutation_rate = min(0.6, mutation_rate * 2)
-            active_mutation_distance = 1.0 * D
-        else:
-            active_mutation_rate = mutation_rate
-            active_mutation_distance = 0.5 * D
- 
-        new_population = [
-            population[index].copy()
-            for index in ranking[:elite_count]
-        ]
- 
-        # Random immigrants: keep feeding in fully fresh, unrelated layouts
-        # every generation so the population never fully converges around
-        # a single genotype the way crossover-only reproduction tends to.
-        immigrant_count = max(1, int(population_size * 0.15))
-        for _ in range(immigrant_count):
-            if len(new_population) < population_size:
-                new_population.append(generate_layout(rng))
- 
-        while len(new_population) < population_size:
-            parent1 = selection(population, search_scores, rng)
-            parent2 = selection(population, search_scores, rng)
- 
-            child = crossover(parent1, parent2, rng)
-            child = mutate(
-                child,
-                rng,
-                active_mutation_rate,
-                active_mutation_distance,
-            )
-            child = repair_layout(child, rng)
- 
-            new_population.append(child)
- 
-        population = new_population
- 
-    return best_layout, best_aep, starting_aep, history
- 
- 
-# GRAPHS
- 
-def make_progress_graph(history, outpath):
-    generations = history["generation"]
-    difference = history["difference"]
- 
-    plt.figure(figsize=(8, 5))
-    plt.plot(
-        generations,
-        difference,
-        marker="o",
-        color="seagreen",
-        linewidth=2,
+    return constrained_score(candidate, baseline) > constrained_score(
+        champion, baseline
     )
-    plt.axhline(0, color="darkorange", linestyle="--", label="Staggered baseline")
- 
-    plt.xticks(generations)
-    plt.xlabel("Generation")
-    plt.ylabel("AEP gain over staggered baseline (MWh)")
-    plt.title("Genetic Algorithm Progress vs. Staggered Baseline")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=150)
-    plt.close()
- 
- 
-def make_best_layout_graph(staggered, best_layout, best_aep, starting_aep, outpath):
-    staggered = np.array(staggered) / D
-    best = np.array(best_layout) / D
- 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
- 
-    axes[0].scatter(staggered[:, 0], staggered[:, 1], color="darkorange", s=45)
-    axes[0].set_title(f"Staggered baseline\n{starting_aep:,.1f} MWh")
- 
-    axes[1].scatter(best[:, 0], best[:, 1], color="seagreen", s=45)
-    diff = best_aep - starting_aep
-    axes[1].set_title(f"Best GA layout\n{best_aep:,.1f} MWh (+{diff:,.1f} MWh)")
- 
-    for ax in axes:
-        ax.set_xlim(-1, width / D + 1)
-        ax.set_ylim(-1, height / D + 1)
+
+
+def adaptive_mutation(generation, stagnant_generations):
+    progress = generation / max(GENERATIONS - 1, 1)
+    rate = INITIAL_MUTATION_RATE + progress * (
+        FINAL_MUTATION_RATE - INITIAL_MUTATION_RATE
+    )
+    distance = D * (
+        INITIAL_MUTATION_DISTANCE_D
+        + progress
+        * (FINAL_MUTATION_DISTANCE_D - INITIAL_MUTATION_DISTANCE_D)
+    )
+    if stagnant_generations >= STAGNATION_LIMIT:
+        rate = min(0.60, rate * 1.8)
+        distance = min(1.5 * D, distance * 1.8)
+    return rate, distance
+
+
+def run_single_optimization(seed, cases, baseline):
+    rng = np.random.default_rng(seed)
+    speeds, directions, densities, weights = map(
+        np.asarray, zip(*cases)
+    )
+    population = generate_population(POPULATION_SIZE, rng)
+    baseline_individual = make_individual(
+        repair_layout(centre_in_domain(staggered_layout()), rng)
+    )
+    population[0] = copy_individual(baseline_individual)
+    best = copy_individual(baseline_individual)
+    best_metrics = baseline
+    stagnant = 0
+    history = {"generation": [], "aep": [], "lcoe": [], "maximum_fatigue": []}
+
+    for generation in range(GENERATIONS):
+        metrics = [
+            evaluate_individual(
+                individual, speeds, directions, densities, weights
+            )
+            for individual in population
+        ]
+        scores = np.array(
+            [constrained_score(item, baseline) for item in metrics]
+        )
+        ranking = np.argsort(scores)[::-1]
+        improved = False
+        for index in ranking[: min(FULL_CHECK_COUNT, len(ranking))]:
+            if is_better(metrics[index], best_metrics, baseline):
+                best = copy_individual(population[index])
+                best_metrics = metrics[index]
+                improved = True
+        stagnant = 0 if improved else stagnant + 1
+        history["generation"].append(generation + 1)
+        history["aep"].append(best_metrics["aep"])
+        history["lcoe"].append(best_metrics["lcoe"])
+        history["maximum_fatigue"].append(best_metrics["maximum_fatigue"])
+        print(
+            f"Seed {seed:>3} | generation {generation + 1:>2}/{GENERATIONS} | "
+            f"AEP {best_metrics['aep']:,.1f} MWh | "
+            f"LCOE ${best_metrics['lcoe']:.2f}/MWh | "
+            f"max fatigue {best_metrics['maximum_fatigue']:.3e}"
+        )
+        if generation + 1 == GENERATIONS:
+            break
+
+        mutation_rate, mutation_distance = adaptive_mutation(
+            generation, stagnant
+        )
+        new_population = [
+            copy_individual(population[index])
+            for index in ranking[:ELITE_COUNT]
+        ]
+        immigrant_count = max(1, int(POPULATION_SIZE * 0.10))
+        new_population.extend(
+            make_individual(generate_layout(rng))
+            for _ in range(
+                min(immigrant_count, POPULATION_SIZE - len(new_population))
+            )
+        )
+        while len(new_population) < POPULATION_SIZE:
+            parent_1 = tournament_selection(population, scores, rng)
+            parent_2 = tournament_selection(population, scores, rng)
+            child = crossover(parent_1, parent_2, rng)
+            child["layout"] = repair_layout(child["layout"], rng)
+            new_population.append(
+                mutate_individual(
+                    child, rng, mutation_rate, mutation_distance
+                )
+            )
+        population = new_population
+    return {"seed": seed, "individual": best, "search_metrics": best_metrics, "history": history}
+
+
+def print_metrics(label, metrics):
+    print(f"\n===== {label} =====")
+    print(f"AEP: {metrics['aep']:,.1f} MWh/year")
+    print(f"LCOE: ${metrics['lcoe']:,.2f}/MWh")
+    print(f"Wake loss: {metrics['wake_loss']:.2f}%")
+    print(f"Maximum fatigue: {metrics['maximum_fatigue']:.3e}")
+    print(f"Mean fatigue: {metrics['mean_fatigue']:.3e}")
+    print(f"Worst turbine: {metrics['worst_turbine']}")
+    print(f"Cable length: {metrics['cable_length_m']:,.1f} m")
+    print(f"Road length: {metrics['road_length_m']:,.1f} m")
+
+
+def make_baseline_graph(layout, metrics, outpath):
+    layout = np.asarray(layout) / D
+    fatigue = metrics["per_turbine_fatigue"]
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(
+        layout[:, 0], layout[:, 1], c=fatigue, cmap="viridis", s=90
+    )
+    fig.colorbar(scatter, ax=ax, label="Relative fatigue index")
+    ax.set(
+        title=(
+            "Staggered baseline\n"
+            f"AEP {metrics['aep']:,.0f} MWh | "
+            f"LCOE ${metrics['lcoe']:.2f}/MWh | "
+            f"Max fatigue {metrics['maximum_fatigue']:.2e}"
+        ),
+        xlabel="X position (D)",
+        ylabel="Y position (D)",
+    )
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+
+
+def make_progress_graph(history, baseline, outpath):
+    generations = history["generation"]
+    figure, axes = plt.subplots(3, 1, figsize=(8, 9), sharex=True)
+    for ax, key, label, base in (
+        (axes[0], "aep", "AEP (MWh)", baseline["aep"]),
+        (axes[1], "lcoe", "LCOE ($/MWh)", baseline["lcoe"]),
+        (
+            axes[2],
+            "maximum_fatigue",
+            "Maximum fatigue",
+            baseline["maximum_fatigue"],
+        ),
+    ):
+        ax.plot(generations, history[key], color="seagreen")
+        ax.axhline(base, color="darkorange", linestyle="--")
+        ax.set_ylabel(label)
+        ax.grid(alpha=0.25)
+    axes[-1].set_xlabel("Generation")
+    figure.suptitle("Best multi-start GA progress vs staggered baseline")
+    figure.tight_layout()
+    figure.savefig(outpath, dpi=150)
+    plt.close(figure)
+
+
+def make_multi_seed_graph(results, baseline, outpath):
+    seeds = [result["seed"] for result in results]
+    figure, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    for ax, key, label, base in (
+        (axes[0], "aep", "AEP (MWh)", baseline["aep"]),
+        (axes[1], "lcoe", "LCOE ($/MWh)", baseline["lcoe"]),
+        (
+            axes[2],
+            "maximum_fatigue",
+            "Maximum fatigue",
+            baseline["maximum_fatigue"],
+        ),
+    ):
+        ax.plot(
+            seeds,
+            [result["metrics"][key] for result in results],
+            marker="o",
+        )
+        ax.axhline(base, color="darkorange", linestyle="--")
+        ax.set_ylabel(label)
+        ax.grid(alpha=0.25)
+    axes[-1].set_xlabel("Seed")
+    figure.suptitle("Full-dataset results for every GA seed")
+    figure.tight_layout()
+    figure.savefig(outpath, dpi=150)
+    plt.close(figure)
+
+
+def make_best_layout_graph(baseline_layout, baseline, best, outpath):
+    layouts = [np.asarray(baseline_layout) / D, best["individual"]["layout"] / D]
+    metrics = [baseline, best["metrics"]]
+    figure, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
+    for ax, layout, item, title in zip(
+        axes, layouts, metrics, ("Staggered baseline", f"Best seed {best['seed']}")
+    ):
+        scatter = ax.scatter(
+            layout[:, 0],
+            layout[:, 1],
+            c=item["per_turbine_fatigue"],
+            cmap="viridis",
+            s=70,
+        )
+        ax.set_title(
+            f"{title}\n{item['aep']:,.0f} MWh | ${item['lcoe']:.2f}/MWh"
+        )
         ax.set_xlabel("X position (D)")
         ax.grid(alpha=0.25)
- 
+        figure.colorbar(scatter, ax=ax, label="Relative fatigue index")
     axes[0].set_ylabel("Y position (D)")
- 
-    plt.suptitle("Best Genetic Algorithm Layout vs. Staggered Baseline")
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=150)
-    plt.close()
- 
- 
-# RUN EXPERIMENT
- 
-def run_optimization():
-    print("Loading wind data...")
-    speeds, directions, samples = load_real_wind_data()
-    print(f"Loaded {samples} wind samples.")
- 
-    staggered_positions = staggered_layout()
- 
-    # `fitness` (fast, subsample-based) ranks the population each
-    # generation using normalized fatigue relative to the staggered baseline.
-    rng = np.random.default_rng(42)
-    sample_size = min(1000, len(speeds))
-    sample_indices = rng.choice(len(speeds), sample_size, replace=False)
-    search_speeds = speeds[sample_indices]
-    search_directions = directions[sample_indices]
+    figure.tight_layout()
+    figure.savefig(outpath, dpi=150)
+    plt.close(figure)
 
-    staggered_search_fatigue = calculate_farm_fatigue(
-        staggered_positions,
-        search_speeds,
-        search_directions,
-    )
-    baseline_max_fatigue = staggered_search_fatigue["maximum_fatigue"]
- 
-    def fitness(layout):
-        fatigue = calculate_farm_fatigue(layout, search_speeds, search_directions)
-        candidate_max_fatigue = fatigue["maximum_fatigue"]
-        return baseline_max_fatigue / candidate_max_fatigue
- 
-    def full_fitness(layout):
-        aep, _ = calculate_aep(layout, speeds, directions)
-        return aep
- 
-    print("\nRunning genetic algorithm...\n")
- 
-    best_layout, best_aep, staggered_aep, history = genetic_algorithm(
-        fitness_function=fitness,
-        full_fitness_function=full_fitness,
-        starting_layout=np.array(staggered_positions),
-        population_size=50,
-        generations=30,
-        elite_count=3,
-        mutation_rate=0.25,
-        full_check_count=2,
-        seed=42,
-    )
-    best_lcoe = calculate_lcoe(layout=best_layout, annual_aep_mwh=best_aep,)
- 
-    _, staggered_wake_loss = calculate_aep(staggered_positions, speeds, directions)
-    _, best_wake_loss = calculate_aep(best_layout, speeds, directions)
-    best_fatigue = calculate_farm_fatigue(best_layout, speeds, directions)
-    staggered_fatigue = calculate_farm_fatigue(staggered_positions, speeds, directions)
-    final_diff = best_aep - staggered_aep
-    final_pct = (final_diff / staggered_aep) * 100
- 
-    print("\n===== FINAL RESULT =====")
-    print(f"Staggered baseline: {staggered_aep:,.1f} MWh | Wake loss: {staggered_wake_loss:.2f}%")
+
+def print_settings():
+    print("\n===== EDITABLE EXPERIMENT SETTINGS =====")
+    print(f"Seeds: {SEEDS}")
+    print(f"Population: {POPULATION_SIZE} | Generations: {GENERATIONS}")
     print(
-        f"Best GA layout:     {best_aep:,.1f} MWh | Wake loss: {best_wake_loss:.2f}% | "
-        f"Difference: +{final_diff:,.1f} MWh ({final_pct:+.3f}%)"
-    )
-    print(f"Best GA layout LCOE: ${best_lcoe:,.2f}/MWh")
-    print(
-        f"Best GA layout fatigue: max = {best_fatigue['maximum_fatigue']:.3e}, "
-        f"mean = {best_fatigue['mean_fatigue']:.3e}, "
-        f"worst turbine = {best_fatigue['worst_turbine']}"
+        f"Domain: {SEARCH_WIDTH_D}D x {SEARCH_HEIGHT_D}D | "
+        f"Minimum spacing: {MIN_SPACING_D}D"
     )
     print(
-        f"Staggered baseline fatigue: max = {staggered_fatigue['maximum_fatigue']:.3e}, "
-        f"mean = {staggered_fatigue['mean_fatigue']:.3e}, "
-        f"worst turbine = {staggered_fatigue['worst_turbine']}"
+        f"Wind rose: {DIRECTION_BINS} direction x {SPEED_BINS} speed bins"
     )
- 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
- 
-    make_progress_graph(
-        history,
-        os.path.join(script_dir, "ga_progress.png"),
+
+
+def run_multi_start():
+    print_settings()
+    print("\nLoading synchronized wind, temperature and pressure data...")
+    weather = load_real_weather_data()
+    speeds = weather["wind_speed_m_s"].to_numpy()
+    directions = weather["wind_direction_deg"].to_numpy()
+    densities = weather["air_density_kg_m3"].to_numpy()
+    print(f"Loaded {len(weather)} synchronized samples.")
+
+    baseline_layout = centre_in_domain(staggered_layout())
+    baseline_individual = make_individual(baseline_layout)
+    full_weights = np.ones(len(weather))
+    baseline = evaluate_individual(
+        baseline_individual, speeds, directions, densities, full_weights
     )
- 
-    make_best_layout_graph(
-        staggered_positions,
-        best_layout,
-        best_aep,
-        staggered_aep,
-        os.path.join(script_dir, "ga_best_layout.png"),
+    print_metrics("STAGGERED BASELINE", baseline)
+    if SAVE_GRAPHS:
+        make_baseline_graph(
+            baseline_layout,
+            baseline,
+            os.path.join(SCRIPT_DIR, "staggered_baseline.png"),
+        )
+
+    cases = build_wind_rose_cases(
+        speeds,
+        directions,
+        densities,
+        DIRECTION_BINS,
+        SPEED_BINS,
     )
- 
-    print("\nGraphs saved:")
-    print("ga_progress.png")
-    print("ga_best_layout.png")
- 
-    return {
-        "staggered_aep": staggered_aep,
-        "best_aep": best_aep,
-        "best_layout": best_layout,
-        "history": history,
-        "best_LCOE": best_lcoe
-    }
- 
- 
+    case_speeds, case_directions, case_densities, case_weights = map(
+        np.asarray, zip(*cases)
+    )
+    search_baseline = evaluate_individual(
+        baseline_individual,
+        case_speeds,
+        case_directions,
+        case_densities,
+        case_weights,
+    )
+
+    results = []
+    for run_number, seed in enumerate(SEEDS, start=1):
+        print(f"\n===== GA START {run_number}/{len(SEEDS)} | SEED {seed} =====")
+        result = run_single_optimization(seed, cases, search_baseline)
+        result["metrics"] = evaluate_individual(
+            result["individual"],
+            speeds,
+            directions,
+            densities,
+            full_weights,
+        )
+        result["constraints_satisfied"] = is_feasible(
+            result["metrics"], baseline
+        )
+        results.append(result)
+        print_metrics(f"SEED {seed} FULL-DATASET WINNER", result["metrics"])
+        print(f"Constraints satisfied: {result['constraints_satisfied']}")
+
+    feasible = [result for result in results if result["constraints_satisfied"]]
+    if not feasible:
+        raise RuntimeError(
+            "No GA seed satisfied both baseline constraints on the full dataset."
+        )
+    best = min(
+        feasible,
+        key=lambda result: (
+            result["metrics"]["lcoe"],
+            result["metrics"]["wake_loss"],
+            -result["metrics"]["aep"],
+        ),
+    )
+    print_metrics(f"FINAL WINNER - SEED {best['seed']}", best["metrics"])
+    print(
+        f"AEP change: {(best['metrics']['aep'] / baseline['aep'] - 1) * 100:+.3f}%"
+    )
+    print(
+        f"LCOE change: {(best['metrics']['lcoe'] / baseline['lcoe'] - 1) * 100:+.3f}%"
+    )
+    print(
+        "Maximum-fatigue change: "
+        f"{(best['metrics']['maximum_fatigue'] / baseline['maximum_fatigue'] - 1) * 100:+.3f}%"
+    )
+
+    if SAVE_GRAPHS:
+        make_progress_graph(
+            best["history"],
+            search_baseline,
+            os.path.join(SCRIPT_DIR, "ga_progress.png"),
+        )
+        make_multi_seed_graph(
+            results,
+            baseline,
+            os.path.join(SCRIPT_DIR, "ga_multi_seed_results.png"),
+        )
+        make_best_layout_graph(
+            baseline_layout,
+            baseline,
+            best,
+            os.path.join(SCRIPT_DIR, "ga_best_layout.png"),
+        )
+        print(
+            "\nGraphs saved: staggered_baseline.png, ga_progress.png, "
+            "ga_multi_seed_results.png, ga_best_layout.png"
+        )
+    return {"baseline_metrics": baseline, "best": best, "runs": results}
+
+
+def run_optimization(seed=None, make_graphs=True):
+    """Compatibility entrypoint; edit SEEDS or pass one seed for a peer run."""
+    global SEEDS, SAVE_GRAPHS
+    previous_seeds, previous_graphs = SEEDS, SAVE_GRAPHS
+    if seed is not None:
+        SEEDS = [seed]
+    SAVE_GRAPHS = make_graphs
+    try:
+        return run_multi_start()
+    finally:
+        SEEDS, SAVE_GRAPHS = previous_seeds, previous_graphs
+
+
 if __name__ == "__main__":
-    results = run_optimization()
+    run_multi_start()

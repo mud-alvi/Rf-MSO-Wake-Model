@@ -1,41 +1,85 @@
-"""
-Generates two candidate 5x5 turbine layouts to compare, per the feedback
-doc's instruction: prove the method works on a small array rather than
-building a full-scale GA right now.
-
-Layout 1: Standard grid, 5D x 5D spacing (within your paper's cited
-          spacing range of 3-5D crosswind / 6-10D downstream -- 5D is a
-          reasonable baseline for both directions here).
-Layout 2: Staggered, offset by half the crosswind spacing every other row,
-          approximating alignment with a prevailing wind direction.
-"""
+"""Baseline layouts and diverse layout-family seeds for the GA."""
 
 import numpy as np
+
 from turbine import vestas
 
 D = vestas.rotor_diameter
-SPACING = 5 * D  # 5 rotor diameters, matches your paper's spacing table
-GRID_SIZE = 5    # 5x5 = 25 turbines
+SPACING = 5 * D
+GRID_SIZE = 5
 
 
 def grid_layout():
-    positions = []
-    for i in range(GRID_SIZE):
-        for j in range(GRID_SIZE):
-            x = i * SPACING
-            y = j * SPACING
-            positions.append((x, y))
-    return positions
+    return [
+        (row * SPACING, column * SPACING)
+        for row in range(GRID_SIZE)
+        for column in range(GRID_SIZE)
+    ]
 
 
 def staggered_layout():
-    positions = []
-    for i in range(GRID_SIZE):
-        row_offset = (SPACING / 2) if (i % 2 == 1) else 0
-        for j in range(GRID_SIZE):
-            x = i * SPACING
-            y = j * SPACING + row_offset
-            positions.append((x, y))
-    return positions
+    return [
+        (
+            row * SPACING,
+            column * SPACING + (SPACING / 2 if row % 2 else 0.0),
+        )
+        for row in range(GRID_SIZE)
+        for column in range(GRID_SIZE)
+    ]
 
 
+def rotate_layout(positions, angle_deg):
+    layout = np.asarray(positions, dtype=float)
+    centre = layout.mean(axis=0)
+    theta = np.radians(angle_deg)
+    rotation = np.array(
+        [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]
+    )
+    return (layout - centre) @ rotation.T + centre
+
+
+def hexagonal_layout(spacing=4.5 * D):
+    return [
+        (
+            column * spacing + (0.5 * spacing if row % 2 else 0.0),
+            row * spacing * np.sqrt(3.0) / 2.0,
+        )
+        for row in range(GRID_SIZE)
+        for column in range(GRID_SIZE)
+    ]
+
+
+def offset_rows_layout(offset=1.25 * D):
+    return [
+        (column * SPACING + row * offset, row * SPACING)
+        for row in range(GRID_SIZE)
+        for column in range(GRID_SIZE)
+    ]
+
+
+def skewed_staggered_layout(skew=0.75 * D):
+    return [
+        (
+            column * SPACING + row * skew,
+            row * SPACING + (0.5 * SPACING if column % 2 else 0.0),
+        )
+        for row in range(GRID_SIZE)
+        for column in range(GRID_SIZE)
+    ]
+
+
+def irregular_layout(rng):
+    layout = np.asarray(staggered_layout(), dtype=float)
+    return layout + rng.normal(0.0, 0.6 * D, layout.shape)
+
+
+def layout_families(rng):
+    staggered = np.asarray(staggered_layout(), dtype=float)
+    return [
+        staggered,
+        rotate_layout(staggered, 15.0),
+        np.asarray(hexagonal_layout()),
+        np.asarray(offset_rows_layout()),
+        np.asarray(skewed_staggered_layout()),
+        irregular_layout(rng),
+    ]

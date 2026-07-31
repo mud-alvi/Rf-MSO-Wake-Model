@@ -1,99 +1,95 @@
-"""
-Gaussian Wake Model (Bastankhah & Porte-Agel, 2014)
-
-This is the wake model your methodology paper cites as the chosen model
-for this project (over Jensen), because it captures wake deflection more
-realistically than Jensen's simple top-hat wake shape.
-
-Reference: Bastankhah, M., & Porte-Agel, F. (2014). A new analytical model
-for wind-turbine wakes. Renewable Energy, 70, 116-123.
-"""
+"""Gaussian wake, yaw-steering, turbulence and fatigue-load helpers."""
 
 import numpy as np
+
 from turbine import vestas
- 
-# Wake expansion / growth rate. Typical literature value for onshore,
-# moderate turbulence conditions is k = 0.075. This directly controls
-# how quickly the wake widens and recovers with downstream distance --
-# tune this later once you have real turbulence intensity data from
-# Days 1-2, since higher turbulence intensity -> higher k -> faster
-# wake recovery.
+
 WAKE_GROWTH_RATE = 0.075
- 
- 
-def wake_deficit(x, y, U_inf, D=None, Ct=None, k=WAKE_GROWTH_RATE):
-    """
-    Calculates the fractional velocity deficit (0 to 1) at a point located
-    x meters downstream and y meters laterally offset from a single
-    turbine's wake centerline.
- 
-    x : downstream distance (m). Must be > 0 (this model is only valid
-        downstream of the turbine).
-    y : lateral (crosswind) offset from the wake centerline (m).
-    U_inf : free-stream (undisturbed) wind speed (m/s).
- 
-    Returns: fractional deficit, so that the actual wind speed at that
-    point is U_inf * (1 - deficit).
-    """
+AMBIENT_TI = 0.077
+
+
+def wake_deficit(
+    x,
+    y,
+    U_inf,
+    D=None,
+    Ct=None,
+    k=WAKE_GROWTH_RATE,
+    yaw_deg=0.0,
+):
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
- 
-    if D is None:
-        D = vestas.rotor_diameter
-    if Ct is None:
-        Ct = vestas.ct_at(U_inf)
-    Ct = float(np.clip(Ct, 0.0, 1.0))
- 
-    deficit = np.zeros_like(x, dtype=float)
+    D = vestas.rotor_diameter if D is None else float(D)
+    Ct = vestas.ct_at(U_inf) if Ct is None else Ct
+    Ct = float(np.clip(Ct, 0.0, 0.999))
+    yaw = np.radians(np.clip(yaw_deg, -25.0, 25.0))
+    ct_yaw = float(np.clip(Ct * np.cos(yaw) ** 2, 0.0, 0.999))
+
+    deficit = np.zeros_like(x)
     valid = x > 0
- 
-    beta = 0.5 * (1 + np.sqrt(1 - Ct)) / np.sqrt(1 - Ct)
-    epsilon = 0.2 * np.sqrt(beta)
- 
-    sigma = k * x[valid] + epsilon * D  # wake width at each x
- 
-    # Core Bastankhah & Porte-Agel Gaussian deficit formula
-    with np.errstate(invalid="ignore"):
-        term_sqrt = 1 - (Ct / (8 * (sigma / D) ** 2))
-        term_sqrt = np.clip(term_sqrt, 0, None)  # avoid negative sqrt
- 
-    deficit[valid] = (1 - np.sqrt(term_sqrt)) * np.exp(
-        -0.5 * (y[valid] / sigma) ** 2
+    if not np.any(valid):
+        return deficit
+
+    root = np.sqrt(1.0 - ct_yaw)
+    beta = 0.5 * (1.0 + root) / root
+    sigma = k * x[valid] + 0.2 * np.sqrt(beta) * D
+    theta = 0.3 * np.tan(yaw) * (1.0 - root) / (1.0 + root)
+    lateral_position = y[valid] - theta * x[valid]
+    term = np.clip(1.0 - ct_yaw / (8.0 * (sigma / D) ** 2), 0.0, None)
+    deficit[valid] = (1.0 - np.sqrt(term)) * np.exp(
+        -0.5 * (lateral_position / sigma) ** 2
     )
- 
     return deficit
- 
- 
-AMBIENT_TI = 0.077
- 
- 
+
+
 def wake_added_turbulence_intensity(x, Ct, I0=AMBIENT_TI, D=None):
-    """Calculates the wake-added turbulence intensity from one turbine.
- 
-    This uses the Crespo–Hernández model:
-      I+ = 0.73 * a^0.8325 * I0^-0.0325 * (x/D)^-0.32
-    where a = (1 - sqrt(1 - Ct)) / 2.
-    """
     x = np.asarray(x, dtype=float)
-    if D is None:
-        D = vestas.rotor_diameter
-    Ct = float(np.clip(Ct, 0.0, 1.0))
+    D = vestas.rotor_diameter if D is None else float(D)
+    Ct = float(np.clip(Ct, 0.0, 0.999))
     a = (1.0 - np.sqrt(1.0 - Ct)) / 2.0
-    I0 = float(I0)
- 
-    wake_ti = np.zeros_like(x, dtype=float)
+    wake_ti = np.zeros_like(x)
     valid = x > 0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        wake_ti[valid] = (
-            0.73
-            * a ** 0.8325
-            * I0 ** (-0.0325)
-            * (x[valid] / D) ** (-0.32)
-        )
- 
+    wake_ti[valid] = (
+        0.73
+        * a ** 0.8325
+        * float(I0) ** -0.0325
+        * (x[valid] / D) ** -0.32
+    )
     return wake_ti
- 
- 
+
+
+def _yaw_array(turbine_positions, yaw_angles):
+    if yaw_angles is None:
+        return np.zeros(len(turbine_positions))
+    yaw_angles = np.asarray(yaw_angles, dtype=float)
+    if yaw_angles.shape != (len(turbine_positions),):
+        raise ValueError("yaw_angles must contain one angle per turbine.")
+    return yaw_angles
+
+
+def combined_wind_speed(
+    turbine_positions,
+    target_x,
+    target_y,
+    U_inf,
+    yaw_angles=None,
+):
+    yaw_angles = _yaw_array(turbine_positions, yaw_angles)
+    total_deficit_sq = 0.0
+    for source_index, (tx, ty) in enumerate(turbine_positions):
+        dx, dy = target_x - tx, target_y - ty
+        if dx <= 0:
+            continue
+        deficit = wake_deficit(
+            np.array([dx]),
+            np.array([dy]),
+            U_inf,
+            yaw_deg=yaw_angles[source_index],
+        )[0]
+        total_deficit_sq += deficit ** 2
+    return float(U_inf) * (1.0 - np.clip(np.sqrt(total_deficit_sq), 0.0, 1.0))
+
+
 def effective_turbulence_intensity(
     turbine_positions,
     target_x,
@@ -101,40 +97,52 @@ def effective_turbulence_intensity(
     U_inf,
     ambient_ti=AMBIENT_TI,
     D=None,
+    yaw_angles=None,
 ):
-    """Calculates effective turbulence intensity (TIeff) at a target point.
- 
-    Combines ambient turbulence with the sum-of-squares of wake-added
-    contributions from upstream turbines.
-    """
-    total_i_plus_sq = 0.0
-    for (tx, ty) in turbine_positions:
-        dx = target_x - tx
-        dy = target_y - ty
+    yaw_angles = _yaw_array(turbine_positions, yaw_angles)
+    total_added_sq = 0.0
+    for source_index, (tx, ty) in enumerate(turbine_positions):
+        dx, dy = target_x - tx, target_y - ty
         if dx <= 0:
             continue
-        Ct = vestas.ct_at(U_inf)
-        i_plus = wake_added_turbulence_intensity(
-            np.array([dx]), Ct, ambient_ti, D
+        yaw = yaw_angles[source_index]
+        Ct = float(vestas.ct_at(U_inf))
+        root = np.sqrt(1.0 - Ct * np.cos(np.radians(yaw)) ** 2)
+        centre_y = (
+            0.3
+            * np.tan(np.radians(yaw))
+            * (1.0 - root)
+            / (1.0 + root)
+            * dx
+        )
+        centre = wake_deficit(
+            np.array([dx]), np.array([centre_y]), U_inf, D=D, Ct=Ct, yaw_deg=yaw
         )[0]
-        total_i_plus_sq += i_plus ** 2
- 
-    return np.sqrt(ambient_ti ** 2 + total_i_plus_sq)
- 
- 
+        local = wake_deficit(
+            np.array([dx]), np.array([dy]), U_inf, D=D, Ct=Ct, yaw_deg=yaw
+        )[0]
+        if centre <= 0:
+            continue
+        overlap = np.clip(local / centre, 0.0, 1.0)
+        ct_yaw = Ct * np.cos(np.radians(yaw)) ** 2
+        added = wake_added_turbulence_intensity(
+            np.array([dx]), ct_yaw, ambient_ti, D
+        )[0]
+        total_added_sq += (added * overlap) ** 2
+    return float(np.sqrt(float(ambient_ti) ** 2 + total_added_sq))
+
+
 def tower_base_bending_moment(thrust_force, hub_height=None):
-    """Calculate the tower-base bending moment from thrust force and hub height."""
-    if hub_height is None:
-        hub_height = vestas.hub_height
+    hub_height = vestas.hub_height if hub_height is None else hub_height
     return np.asarray(thrust_force, dtype=float) * float(hub_height)
- 
- 
+
+
 def tower_base_load_proxy(thrust_force, ti_eff, hub_height=None):
-    """Calculate a turbulence-driven cyclic tower-base load proxy."""
-    moment = tower_base_bending_moment(thrust_force, hub_height)
-    return moment * np.asarray(ti_eff, dtype=float)
- 
- 
+    return tower_base_bending_moment(thrust_force, hub_height) * np.asarray(
+        ti_eff, dtype=float
+    )
+
+
 def tower_base_load_proxy_at_point(
     turbine_positions,
     target_x,
@@ -144,39 +152,21 @@ def tower_base_load_proxy_at_point(
     rho=1.225,
     D=None,
     hub_height=None,
+    yaw_angles=None,
+    target_yaw_deg=0.0,
 ):
-    """Calculate the tower-base load proxy for a single turbine in a layout."""
-    Ueff = combined_wind_speed(turbine_positions, target_x, target_y, U_inf)
+    effective_speed = combined_wind_speed(
+        turbine_positions, target_x, target_y, U_inf, yaw_angles
+    )
     ti_eff = effective_turbulence_intensity(
         turbine_positions,
         target_x,
         target_y,
         U_inf,
-        ambient_ti=ambient_ti,
-        D=D,
+        ambient_ti,
+        D,
+        yaw_angles,
     )
-    thrust = vestas.thrust_force(Ueff, air_density=rho)
+    thrust = vestas.thrust_force(effective_speed, air_density=rho)
+    thrust *= np.cos(np.radians(target_yaw_deg)) ** 2
     return tower_base_load_proxy(thrust, ti_eff, hub_height)
- 
- 
-def combined_wind_speed(turbine_positions, target_x, target_y, U_inf):
-    """
-    Calculates the effective wind speed at a target point, accounting for
-    wakes from ALL upstream turbines using sum-of-squares superposition
-    (the standard way to combine multiple overlapping wakes).
- 
-    turbine_positions : list of (x, y) tuples for every turbine in the farm
-    target_x, target_y : location to evaluate (usually another turbine's position)
-    U_inf : free-stream wind speed (m/s)
-    """
-    total_deficit_sq = 0.0
-    for (tx, ty) in turbine_positions:
-        dx = target_x - tx
-        dy = target_y - ty
-        if dx <= 0:
-            continue  # turbines behind the target don't affect it
-        d = wake_deficit(np.array([dx]), np.array([dy]), U_inf)[0]
-        total_deficit_sq += d ** 2
- 
-    total_deficit = np.sqrt(total_deficit_sq)
-    return U_inf * (1 - total_deficit)
