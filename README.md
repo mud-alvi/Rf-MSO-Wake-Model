@@ -42,3 +42,9 @@ SOURCE: https://www.thewindpower.net/turbine_power_curve_en_590_vestas_v110-2000
 6. other turbine properties were also added in the 'turbine.py' file
 
 NOAA SOURCE: https://www.ncei.noaa.gov/access/search/data-search/local-climatological-data-v2
+
+28 July:
+1. Modelled the fatigue calculation script and all the required imports were used as necessary and a validation script was also added to calculate and export the value when needed
+
+ 30 July:
+ 1. 
