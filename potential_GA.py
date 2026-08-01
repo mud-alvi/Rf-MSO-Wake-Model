@@ -276,11 +276,16 @@ def run_single_optimization(seed, cases, baseline):
         history["aep"].append(best_metrics["aep"])
         history["lcoe"].append(best_metrics["lcoe"])
         history["maximum_fatigue"].append(best_metrics["maximum_fatigue"])
+        normalized_fatigue = (
+            best_metrics["maximum_fatigue"]
+            / baseline["maximum_fatigue"]
+        )
         print(
             f"Seed {seed:>3} | generation {generation + 1:>2}/{GENERATIONS} | "
             f"AEP {best_metrics['aep']:,.1f} MWh | "
             f"LCOE ${best_metrics['lcoe']:.2f}/MWh | "
-            f"max fatigue {best_metrics['maximum_fatigue']:.3e}"
+            f"fatigue {normalized_fatigue:.3f} "
+            f"(raw {best_metrics['maximum_fatigue']:.3e})"
         )
         if generation + 1 == GENERATIONS:
             break
@@ -313,13 +318,41 @@ def run_single_optimization(seed, cases, baseline):
     return {"seed": seed, "individual": best, "search_metrics": best_metrics, "history": history}
 
 
-def print_metrics(label, metrics):
+def relative_fatigue(metrics, baseline):
+    """Return fatigue values normalized against the staggered baseline."""
+    if baseline["maximum_fatigue"] <= 0 or baseline["mean_fatigue"] <= 0:
+        raise ValueError("Baseline fatigue values must be greater than zero.")
+
+    return {
+        "maximum": (
+            metrics["maximum_fatigue"]
+            / baseline["maximum_fatigue"]
+        ),
+        "mean": metrics["mean_fatigue"] / baseline["mean_fatigue"],
+    }
+
+
+def print_metrics(label, metrics, baseline=None):
     print(f"\n===== {label} =====")
     print(f"AEP: {metrics['aep']:,.1f} MWh/year")
     print(f"LCOE: ${metrics['lcoe']:,.2f}/MWh")
     print(f"Wake loss: {metrics['wake_loss']:.2f}%")
     print(f"Maximum fatigue: {metrics['maximum_fatigue']:.3e}")
     print(f"Mean fatigue: {metrics['mean_fatigue']:.3e}")
+    if baseline is not None:
+        normalized = relative_fatigue(metrics, baseline)
+        print(
+            "Normalized maximum fatigue (baseline = 1.000): "
+            f"{normalized['maximum']:.3f}"
+        )
+        print(
+            "Normalized mean fatigue (baseline = 1.000): "
+            f"{normalized['mean']:.3f}"
+        )
+        print(
+            "Maximum-fatigue reduction: "
+            f"{(1.0 - normalized['maximum']) * 100:+.2f}%"
+        )
     print(f"Worst turbine: {metrics['worst_turbine']}")
     print(f"Cable length: {metrics['cable_length_m']:,.1f} m")
     print(f"Road length: {metrics['road_length_m']:,.1f} m")
@@ -375,27 +408,94 @@ def make_progress_graph(history, baseline, outpath):
 
 def make_multi_seed_graph(results, baseline, outpath):
     seeds = [result["seed"] for result in results]
-    figure, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
-    for ax, key, label, base in (
-        (axes[0], "aep", "AEP (MWh)", baseline["aep"]),
-        (axes[1], "lcoe", "LCOE ($/MWh)", baseline["lcoe"]),
-        (
-            axes[2],
-            "maximum_fatigue",
-            "Maximum fatigue",
-            baseline["maximum_fatigue"],
-        ),
-    ):
-        ax.plot(
-            seeds,
-            [result["metrics"][key] for result in results],
-            marker="o",
+    aep_values = [result["metrics"]["aep"] for result in results]
+    lcoe_values = [result["metrics"]["lcoe"] for result in results]
+    fatigue_values = [
+        relative_fatigue(result["metrics"], baseline)["maximum"]
+        for result in results
+    ]
+
+    figure, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+
+    axes[0].plot(seeds, aep_values, marker="o", color="steelblue")
+    axes[0].axhline(
+        baseline["aep"],
+        color="darkorange",
+        linestyle="--",
+        label="Staggered baseline",
+    )
+    axes[0].annotate(
+        f"Baseline: {baseline['aep']:,.1f}",
+        xy=(1.0, baseline["aep"]),
+        xycoords=("axes fraction", "data"),
+        xytext=(-5, 5),
+        textcoords="offset points",
+        ha="right",
+        color="darkorange",
+        fontsize=8,
+    )
+    axes[0].set_ylabel("AEP (MWh/year)")
+    axes[0].legend()
+    axes[0].grid(alpha=0.25)
+
+    axes[1].plot(seeds, lcoe_values, marker="o", color="seagreen")
+    axes[1].axhline(
+        baseline["lcoe"],
+        color="darkorange",
+        linestyle="--",
+        label="Staggered baseline",
+    )
+    axes[1].annotate(
+        f"Baseline: ${baseline['lcoe']:.2f}",
+        xy=(1.0, baseline["lcoe"]),
+        xycoords=("axes fraction", "data"),
+        xytext=(-5, 5),
+        textcoords="offset points",
+        ha="right",
+        color="darkorange",
+        fontsize=8,
+    )
+    axes[1].set_ylabel("LCOE ($/MWh)")
+    axes[1].legend()
+    axes[1].grid(alpha=0.25)
+
+    axes[2].plot(seeds, fatigue_values, marker="o", color="firebrick")
+    axes[2].axhline(
+        1.0,
+        color="darkorange",
+        linestyle="--",
+        label="Staggered baseline = 1.000",
+    )
+    axes[2].annotate(
+        f"Baseline: 1.000 (raw {baseline['maximum_fatigue']:.3e})",
+        xy=(1.0, 1.0),
+        xycoords=("axes fraction", "data"),
+        xytext=(-5, 5),
+        textcoords="offset points",
+        ha="right",
+        color="darkorange",
+        fontsize=8,
+    )
+    for seed, value in zip(seeds, fatigue_values):
+        axes[2].annotate(
+            f"{value:.3f}",
+            (seed, value),
+            xytext=(0, 7),
+            textcoords="offset points",
+            ha="center",
+            fontsize=8,
         )
-        ax.axhline(base, color="darkorange", linestyle="--")
-        ax.set_ylabel(label)
-        ax.grid(alpha=0.25)
-    axes[-1].set_xlabel("Seed")
-    figure.suptitle("Full-dataset results for every GA seed")
+    axes[2].set_ylabel(
+        "Normalized maximum fatigue\n(staggered baseline = 1.000)"
+    )
+    axes[2].set_xlabel("Seed")
+    axes[2].legend()
+    axes[2].grid(alpha=0.25)
+
+    figure.suptitle(
+        "Full-dataset results for every GA seed\n"
+        "Fatigue normalized against staggered baseline"
+    )
     figure.tight_layout()
     figure.savefig(outpath, dpi=150)
     plt.close(figure)
@@ -455,7 +555,7 @@ def run_multi_start():
     baseline = evaluate_individual(
         baseline_individual, speeds, directions, densities, full_weights
     )
-    print_metrics("STAGGERED BASELINE", baseline)
+    print_metrics("STAGGERED BASELINE", baseline, baseline)
     if SAVE_GRAPHS:
         make_baseline_graph(
             baseline_layout,
@@ -496,7 +596,11 @@ def run_multi_start():
             result["metrics"], baseline
         )
         results.append(result)
-        print_metrics(f"SEED {seed} FULL-DATASET WINNER", result["metrics"])
+        print_metrics(
+            f"SEED {seed} FULL-DATASET WINNER",
+            result["metrics"],
+            baseline,
+        )
         print(f"Constraints satisfied: {result['constraints_satisfied']}")
 
     feasible = [result for result in results if result["constraints_satisfied"]]
@@ -512,7 +616,9 @@ def run_multi_start():
             -result["metrics"]["aep"],
         ),
     )
-    print_metrics(f"FINAL WINNER - SEED {best['seed']}", best["metrics"])
+    print_metrics(
+        f"FINAL WINNER - SEED {best['seed']}", best["metrics"], baseline
+    )
     print(
         f"AEP change: {(best['metrics']['aep'] / baseline['aep'] - 1) * 100:+.3f}%"
     )
