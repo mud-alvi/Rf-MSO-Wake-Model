@@ -260,13 +260,16 @@ def wind_speed_at_hub(
     hub_height=vestas.hub_height,
     roughness_length=ROUGHNESS_LENGTH_M,
 ):
+    #return np.asarray(reference_speed, dtype=float)
+    #unrealistic hub height which caused more AEP to be produced rather than a realistic figure
+    
     if min(reference_height, hub_height, roughness_length) <= 0:
         raise ValueError("Wind-shear heights and roughness must be positive.")
     return np.asarray(reference_speed, dtype=float) * (
         np.log(hub_height / roughness_length)
         / np.log(reference_height / roughness_length)
     )
-
+    
 
 def build_wind_rose_cases(
     speeds,
@@ -829,6 +832,8 @@ def run_experiment():
     speeds = weather["wind_speed_m_s"].to_numpy()
     directions = weather["wind_direction_deg"].to_numpy()
     densities = weather["air_density_kg_m3"].to_numpy()
+    #densities = np.full(len(weather), 1.225)
+    #old density which caused a higher AEP but was unrealistic
 
     layouts = {
         "grid": centre_layout_in_domain(grid_layout()),

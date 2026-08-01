@@ -16,9 +16,9 @@ from turbine import vestas
 
 # ========================= EXPERIMENT SETTINGS =========================
 # Peers can edit these values directly in their IDE for separate runs.
-SEEDS = list(range(20))
+SEEDS = [0,1,2,3]
 POPULATION_SIZE = 60
-GENERATIONS = 40
+GENERATIONS = 20
 TOURNAMENT_SIZE = 4
 ELITE_COUNT = 3
 FULL_CHECK_COUNT = 3

@@ -1,11 +1,13 @@
 import os
 
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 import main
 from drought_monitor import load_drought_data
+from turbine import vestas
 from weather_hazards import (
     load_hourly_hazard_data,
     make_hourly_hazard_graph,
@@ -21,6 +23,11 @@ NOAA_CSV = os.path.join(SCRIPT_DIR, "4356691.csv")
 HEAT_F = 104
 COLD_F = -4
 GUST_MPH = 55
+
+# Convert turbine temperature limits from Celsius to Fahrenheit because
+# the NOAA TMIN and TMAX columns use Fahrenheit.
+MIN_OPERATING_F = (vestas.min_operating_temperature * 9 / 5) + 32
+MAX_OPERATING_F = (vestas.max_operating_temperature * 9 / 5) + 32
 
 # Assumed production loss when an extreme-weather event occurs
 LOSS_LEVELS = {
@@ -44,7 +51,7 @@ def load_noaa(start_year=main.START_YEAR, end_year=main.END_YEAR):
 
 
 def weather_loss_fraction(df, penalties):
-    # Calculate the average assumed production loss across all days
+    # Calculate the average assumed production loss across all days.
     daily = pd.concat(
         [
             df["heat"] * penalties["heat"],
@@ -54,7 +61,16 @@ def weather_loss_fraction(df, penalties):
         axis=1,
     ).max(axis=1)
 
-    # The worst single loss is used if hazards overlap on the same day
+    # Assume complete shutdown outside the Vestas operating-temperature
+    # range of -20°C to 45°C.
+    temperature_shutdown = (
+        (df["TMIN"] < MIN_OPERATING_F)
+        | (df["TMAX"] > MAX_OPERATING_F)
+    )
+
+    daily = daily.mask(temperature_shutdown, 1.0)
+
+    # Use the worst single loss when hazards overlap on the same day.
     return daily.mean()
 
 
@@ -260,8 +276,8 @@ def print_hourly_hazard_summary(hourly, summary):
 def run():
     # Run the wake model once and create the resilience graphs
     wake = main.run_experiment()
-    grid_aep = wake["grid_aep"]
-    stag_aep = wake["stag_aep"]
+    grid_aep = wake["grid"]["aep"]
+    stag_aep = wake["staggered"]["aep"]
     noaa = load_noaa()
 
     print(
