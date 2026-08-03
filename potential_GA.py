@@ -11,12 +11,15 @@ from main import (
     build_wind_rose_cases,
     calculate_layout_performance,
     load_real_weather_data,
+    _active_yaw_angles,
+    rotate_layout_to_wind_frame,
+    wind_speed_at_hub,
 )
 from turbine import vestas
 
 # ========================= EXPERIMENT SETTINGS =========================
 # Peers can edit these values directly in their IDE for separate runs.
-SEEDS = [0,1,2,3]
+SEEDS = [1, 8, 42]
 POPULATION_SIZE = 60
 GENERATIONS = 20
 TOURNAMENT_SIZE = 4
@@ -43,7 +46,7 @@ SAVE_GRAPHS = True
 # ======================================================================
 
 D = vestas.rotor_diameter
-TURBINES = 25
+TURBINES = 30
 WIDTH = SEARCH_WIDTH_D * D
 HEIGHT = SEARCH_HEIGHT_D * D
 MIN_SPACING = MIN_SPACING_D * D
@@ -65,7 +68,7 @@ def centre_in_domain(layout):
 
 def generate_layout(rng):
     layout = []
-    for _ in range(20000):
+    for _ in range(100000):  #30 turbine change 2 
         candidate = rng.uniform([0.0, 0.0], [WIDTH, HEIGHT])
         if all(
             np.linalg.norm(candidate - existing) >= MIN_SPACING
@@ -81,7 +84,7 @@ def repair_layout(layout, rng):
     repaired = []
     for original in np.asarray(layout, dtype=float):
         candidate = np.clip(original, [0.0, 0.0], [WIDTH, HEIGHT])
-        for attempt in range(5000):
+        for attempt in range(10000):
             if all(
                 np.linalg.norm(candidate - existing) >= MIN_SPACING
                 for existing in repaired
@@ -292,13 +295,36 @@ def run_single_optimization(seed, cases, baseline):
             copy_individual(population[index])
             for index in ranking[:ELITE_COUNT]
         ]
-        immigrant_count = max(1, int(POPULATION_SIZE * 0.10))
+        immigrant_count = max(1, int(POPULATION_SIZE * 0.05)) #30 Turbines change 1
+        """"""""""
         new_population.extend(
             make_individual(generate_layout(rng))
             for _ in range(
                 min(immigrant_count, POPULATION_SIZE - len(new_population))
             )
         )
+        """""""""
+        number_of_immigrants = min(
+            immigrant_count,
+            POPULATION_SIZE - len(new_population),
+        )
+
+        for _ in range(number_of_immigrants):
+            try:
+                new_population.append(
+                    make_individual(generate_layout(rng))
+                )
+            except RuntimeError:
+                fallback_parent = population[rng.integers(len(population))]
+
+                new_population.append(
+                    mutate_individual(
+                       fallback_parent,
+                       rng,
+                       rate=0.60,
+                       distance=1.25 * D,
+                    )
+                )
         while len(new_population) < POPULATION_SIZE:
             parent_1 = tournament_selection(population, scores, rng)
             parent_2 = tournament_selection(population, scores, rng)
@@ -400,30 +426,257 @@ def make_multi_seed_graph(results, baseline, outpath):
     figure.savefig(outpath, dpi=150)
     plt.close(figure)
 
+def dominant_yaw_snapshot(individual, speeds, directions):
+    """Return the applied yaw of every turbine for the dominant wind sector."""
+    speeds = np.asarray(speeds, dtype=float)
+    directions = np.asarray(directions, dtype=float) % 360.0
 
-def make_best_layout_graph(baseline_layout, baseline, best, outpath):
-    layouts = [np.asarray(baseline_layout) / D, best["individual"]["layout"] / D]
-    metrics = [baseline, best["metrics"]]
-    figure, axes = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
-    for ax, layout, item, title in zip(
-        axes, layouts, metrics, ("Staggered baseline", f"Best seed {best['seed']}")
+    sector_width = 360.0 / DIRECTION_BINS
+    sector_indices = np.floor(
+        directions / sector_width
+    ).astype(int)
+
+    # Select the wind-direction sector containing the most weather samples.
+    dominant_sector = int(
+        np.argmax(
+            np.bincount(
+                sector_indices,
+                minlength=DIRECTION_BINS,
+            )
+        )
+    )
+
+    selected = sector_indices == dominant_sector
+
+    # Use the centre of the dominant direction sector.
+    dominant_direction = (
+        dominant_sector + 0.5
+    ) * sector_width
+
+    # Convert the representative wind speed from 100 m to 95 m hub height.
+    representative_speed = float(
+        wind_speed_at_hub(speeds[selected]).mean()
+    )
+
+    # Final yaw selected by the winning GA individual for this sector.
+    sector_yaw = float(
+        individual["yaw"][dominant_sector]
+    )
+
+    rotated_layout = rotate_layout_to_wind_frame(
+        individual["layout"],
+        dominant_direction,
+    )
+
+    # Apply the sector yaw only to turbines that have a downstream wake target.
+    turbine_yaws = _active_yaw_angles(
+        rotated_layout,
+        representative_speed,
+        sector_yaw,
+    )
+
+    return (
+        dominant_direction,
+        representative_speed,
+        turbine_yaws,
+    )
+
+
+def make_best_layout_graph(
+    baseline_layout,
+    baseline,
+    best,
+    speeds,
+    directions,
+    outpath,
+):
+    (
+        dominant_direction,
+        representative_speed,
+        best_yaws,
+    ) = dominant_yaw_snapshot(
+        best["individual"],
+        speeds,
+        directions,
+    )
+
+    layouts = [
+        np.asarray(baseline_layout, dtype=float) / D,
+        np.asarray(
+            best["individual"]["layout"],
+            dtype=float,
+        ) / D,
+    ]
+
+    metrics = [
+        baseline,
+        best["metrics"],
+    ]
+
+    titles = [
+        "Staggered baseline",
+        f"Best seed {best['seed']}",
+    ]
+
+    # Baseline turbines have no yaw steering.
+    yaw_values = [
+        np.zeros(TURBINES),
+        best_yaws,
+    ]
+
+    figure, axes = plt.subplots(
+        1,
+        2,
+        figsize=(15, 7),
+        sharex=True,
+        sharey=True,
+    )
+
+    for panel, (
+        ax,
+        layout,
+        item,
+        title,
+        turbine_yaws,
+    ) in enumerate(
+        zip(
+            axes,
+            layouts,
+            metrics,
+            titles,
+            yaw_values,
+        )
     ):
         scatter = ax.scatter(
             layout[:, 0],
             layout[:, 1],
             c=item["per_turbine_fatigue"],
             cmap="viridis",
-            s=70,
+            s=100,
+            zorder=2,
         )
+
+        # The model treats dominant_direction as the downstream flow axis.
+        # Turbines face in the opposite direction, with yaw added.
+        facing_directions = (
+            dominant_direction
+            + 180.0
+            + turbine_yaws
+        ) % 360.0
+
+        facing_radians = np.radians(facing_directions)
+
+        # Arrow length is measured in rotor-diameter units.
+        arrow_length = 0.90
+        arrow_x = arrow_length * np.cos(facing_radians)
+        arrow_y = arrow_length * np.sin(facing_radians)
+
+        ax.quiver(
+            layout[:, 0],
+            layout[:, 1],
+            arrow_x,
+            arrow_y,
+            angles="xy",
+            scale_units="xy",
+            scale=1,
+            color="black",
+            width=0.006,
+            headwidth=4,
+            headlength=5,
+            headaxislength=4.5,
+            pivot="middle",
+            zorder=3,
+        )
+
+        for turbine_number, ((x, y), yaw) in enumerate(
+            zip(layout, turbine_yaws),
+            start=1,
+        ):
+            if panel == 0:
+                label = f"T{turbine_number}"
+            else:
+                label = (
+                    f"T{turbine_number}\n"
+                    f"{yaw:+.1f}°"
+                )
+
+            ax.annotate(
+                label,
+                (x, y),
+                xytext=(7, 7),
+                textcoords="offset points",
+                fontsize=7,
+                zorder=4,
+            )
+
+        # Draw a larger blue arrow showing downstream wind flow.
+        flow_angle = np.radians(dominant_direction)
+        flow_dx = 0.12 * np.cos(flow_angle)
+        flow_dy = 0.12 * np.sin(flow_angle)
+
+        flow_centre_x = 0.14
+        flow_centre_y = 0.88
+
+        ax.annotate(
+            "",
+            xy=(
+                flow_centre_x + flow_dx / 2.0,
+                flow_centre_y + flow_dy / 2.0,
+            ),
+            xytext=(
+                flow_centre_x - flow_dx / 2.0,
+                flow_centre_y - flow_dy / 2.0,
+            ),
+            xycoords="axes fraction",
+            arrowprops={
+                "arrowstyle": "->",
+                "color": "dodgerblue",
+                "linewidth": 2.5,
+            },
+        )
+
+        ax.text(
+            0.03,
+            0.97,
+            "Wind flow",
+            transform=ax.transAxes,
+            color="dodgerblue",
+            fontsize=8,
+            va="top",
+        )
+
         ax.set_title(
-            f"{title}\n{item['aep']:,.0f} MWh | ${item['lcoe']:.2f}/MWh"
+            f"{title}\n"
+            f"{item['aep']:,.0f} MWh | "
+            f"${item['lcoe']:.2f}/MWh"
         )
         ax.set_xlabel("X position (D)")
+        ax.set_aspect("equal", adjustable="box")
         ax.grid(alpha=0.25)
-        figure.colorbar(scatter, ax=ax, label="Relative fatigue index")
+
+        figure.colorbar(
+            scatter,
+            ax=ax,
+            label="Relative fatigue index",
+        )
+
     axes[0].set_ylabel("Y position (D)")
+
+    figure.suptitle(
+        "Final GA layout and turbine facing directions\n"
+        f"Dominant sector: {dominant_direction:.1f}° | "
+        f"Representative hub-height speed: "
+        f"{representative_speed:.1f} m/s\n"
+        "Black arrows = turbine facing direction | "
+        "Blue arrow = wind flow"
+    )
+
     figure.tight_layout()
-    figure.savefig(outpath, dpi=150)
+    figure.savefig(
+        outpath,
+        dpi=150,
+        bbox_inches="tight",
+    )
     plt.close(figure)
 
 
@@ -539,6 +792,8 @@ def run_multi_start():
             baseline_layout,
             baseline,
             best,
+            speeds,
+            directions,
             os.path.join(SCRIPT_DIR, "ga_best_layout.png"),
         )
         print(

@@ -6,14 +6,15 @@ from turbine import vestas
 
 D = vestas.rotor_diameter
 SPACING = 5 * D
-GRID_SIZE = 5
-
+#GRID_SIZE = 5
+GRID_ROW = 6
+GRID_COLUMN = 5
 
 def grid_layout():
     return [
         (row * SPACING, column * SPACING)
-        for row in range(GRID_SIZE)
-        for column in range(GRID_SIZE)
+        for row in range(GRID_ROW)
+        for column in range(GRID_COLUMN)
     ]
 
 
@@ -23,8 +24,8 @@ def staggered_layout():
             row * SPACING,
             column * SPACING + (SPACING / 2 if row % 2 else 0.0),
         )
-        for row in range(GRID_SIZE)
-        for column in range(GRID_SIZE)
+        for row in range(GRID_ROW)
+        for column in range(GRID_COLUMN)
     ]
 
 
@@ -44,16 +45,16 @@ def hexagonal_layout(spacing=4.5 * D):
             column * spacing + (0.5 * spacing if row % 2 else 0.0),
             row * spacing * np.sqrt(3.0) / 2.0,
         )
-        for row in range(GRID_SIZE)
-        for column in range(GRID_SIZE)
+        for row in range(GRID_ROW)
+        for column in range(GRID_COLUMN)
     ]
 
 
 def offset_rows_layout(offset=1.25 * D):
     return [
         (column * SPACING + row * offset, row * SPACING)
-        for row in range(GRID_SIZE)
-        for column in range(GRID_SIZE)
+        for row in range(GRID_ROW)
+        for column in range(GRID_COLUMN)
     ]
 
 
@@ -63,8 +64,8 @@ def skewed_staggered_layout(skew=0.75 * D):
             column * SPACING + row * skew,
             row * SPACING + (0.5 * SPACING if column % 2 else 0.0),
         )
-        for row in range(GRID_SIZE)
-        for column in range(GRID_SIZE)
+        for row in range(GRID_ROW)
+        for column in range(GRID_COLUMN)
     ]
 
 
