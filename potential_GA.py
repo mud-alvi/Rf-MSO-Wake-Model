@@ -19,9 +19,9 @@ from turbine import vestas
 
 # ========================= EXPERIMENT SETTINGS =========================
 # Peers can edit these values directly in their IDE for separate runs.
-SEEDS = [1, 8, 42]
+SEEDS = [1]
 POPULATION_SIZE = 60
-GENERATIONS = 20
+GENERATIONS = 25
 TOURNAMENT_SIZE = 4
 ELITE_COUNT = 3
 FULL_CHECK_COUNT = 3
@@ -46,7 +46,7 @@ SAVE_GRAPHS = True
 # ======================================================================
 
 D = vestas.rotor_diameter
-TURBINES = 30
+TURBINES = 25
 WIDTH = SEARCH_WIDTH_D * D
 HEIGHT = SEARCH_HEIGHT_D * D
 MIN_SPACING = MIN_SPACING_D * D
@@ -295,7 +295,7 @@ def run_single_optimization(seed, cases, baseline):
             copy_individual(population[index])
             for index in ranking[:ELITE_COUNT]
         ]
-        immigrant_count = max(1, int(POPULATION_SIZE * 0.05)) #30 Turbines change 1
+        immigrant_count = max(1, int(POPULATION_SIZE * 0.10)) #30 Turbines change 1
         """
         new_population.extend(
             make_individual(generate_layout(rng))
