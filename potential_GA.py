@@ -296,14 +296,14 @@ def run_single_optimization(seed, cases, baseline):
             for index in ranking[:ELITE_COUNT]
         ]
         immigrant_count = max(1, int(POPULATION_SIZE * 0.05)) #30 Turbines change 1
-        """"""""""
+        """
         new_population.extend(
             make_individual(generate_layout(rng))
             for _ in range(
                 min(immigrant_count, POPULATION_SIZE - len(new_population))
             )
         )
-        """""""""
+        """
         number_of_immigrants = min(
             immigrant_count,
             POPULATION_SIZE - len(new_population),
