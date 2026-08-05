@@ -7,8 +7,8 @@ from turbine import vestas
 D = vestas.rotor_diameter
 SPACING = 5 * D
 #GRID_SIZE = 5
-GRID_ROW = 6
-GRID_COLUMN = 6
+GRID_ROW = 5
+GRID_COLUMN = 5
 
 def grid_layout():
     return [

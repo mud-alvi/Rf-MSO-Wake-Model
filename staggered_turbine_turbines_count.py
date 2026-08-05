@@ -9,8 +9,8 @@ from turbine import vestas
 
 
 # ===== EDITABLE SETTINGS =====
-TURBINE_COUNT = 60
-SPACING_D = 2.7
+TURBINE_COUNT = 25
+SPACING_D = 4.0
 TURBINES_PER_COLUMN = 5
 MINIMUM_DOMAIN_D = 25.0
 # =============================
@@ -87,7 +87,7 @@ def save_layout_graph(layout, domain, fatigue, results):
     axis.set_ylabel("Y position (D)")
     axis.grid(alpha=0.25)
     axis.set_title(
-        "Staggered layout 60 turbines\n"
+        "Staggered layout 25 (base) turbines\n"
         f"AEP {results['aep']:,.0f} MWh | "
         f"LCOE ${results['lcoe']:.2f}/MWh | "
         f"Max fatigue {results['maximum_fatigue']:.2e}"
