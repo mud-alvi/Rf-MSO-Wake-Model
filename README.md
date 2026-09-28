@@ -63,4 +63,4 @@ NOAA SOURCE: https://www.ncei.noaa.gov/access/search/data-search/local-climatolo
 4. Previously the GA tested out different layouts only but another variable was added of yaw angle optimization to further decrease stagnation and increase chances of a potential better layout than the selected staggered baseline.
 
 2 August:
-1. 
+1. Simulations ran. 
